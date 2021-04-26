@@ -24,16 +24,12 @@ import java.util.Optional;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
-import org.apache.iceberg.encryption.EncryptionManager;
 import org.apache.iceberg.hadoop.HadoopTables;
-import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.spark.SparkSchemaUtil;
 import org.apache.iceberg.spark.SparkUtil;
 import org.apache.iceberg.spark.SparkWriteOptions;
 import org.apache.iceberg.types.TypeUtil;
-import org.apache.spark.api.java.JavaSparkContext;
-import org.apache.spark.broadcast.Broadcast;
 import org.apache.spark.sql.SaveMode;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.execution.streaming.StreamExecution;
@@ -55,7 +51,6 @@ public class IcebergSource implements DataSourceV2, ReadSupport, WriteSupport, D
     StreamWriteSupport, MicroBatchReadSupport {
 
   private SparkSession lazySpark = null;
-  private JavaSparkContext lazySparkContext = null;
   private Configuration lazyConf = null;
 
   @Override
@@ -74,10 +69,7 @@ public class IcebergSource implements DataSourceV2, ReadSupport, WriteSupport, D
     Table table = getTableAndResolveHadoopConfiguration(options, conf);
     String caseSensitive = lazySparkSession().conf().get("spark.sql.caseSensitive");
 
-    Broadcast<FileIO> io = lazySparkContext().broadcast(SparkUtil.serializableFileIO(table));
-    Broadcast<EncryptionManager> encryptionManager = lazySparkContext().broadcast(table.encryption());
-
-    Reader reader = new Reader(table, io, encryptionManager, Boolean.parseBoolean(caseSensitive), options);
+    Reader reader = new Reader(lazySparkSession(), table, Boolean.parseBoolean(caseSensitive), options);
     if (readSchema != null) {
       // convert() will fail if readSchema contains fields not in table.schema()
       SparkSchemaUtil.convert(table.schema(), readSchema);
@@ -101,11 +93,8 @@ public class IcebergSource implements DataSourceV2, ReadSupport, WriteSupport, D
     String wapId = lazySparkSession().conf().get("spark.wap.id", null);
     boolean replacePartitions = mode == SaveMode.Overwrite;
 
-    Broadcast<FileIO> io = lazySparkContext().broadcast(SparkUtil.serializableFileIO(table));
-    Broadcast<EncryptionManager> encryptionManager = lazySparkContext().broadcast(table.encryption());
-
     return Optional.of(new Writer(
-        table, io, encryptionManager, options, replacePartitions, appId, wapId, writeSchema, dsStruct));
+        lazySparkSession(), table, options, replacePartitions, appId, wapId, writeSchema, dsStruct));
   }
 
   @Override
@@ -124,10 +113,7 @@ public class IcebergSource implements DataSourceV2, ReadSupport, WriteSupport, D
     String queryId = lazySparkSession().sparkContext().getLocalProperty(StreamExecution.QUERY_ID_KEY());
     String appId = lazySparkSession().sparkContext().applicationId();
 
-    Broadcast<FileIO> io = lazySparkContext().broadcast(SparkUtil.serializableFileIO(table));
-    Broadcast<EncryptionManager> encryptionManager = lazySparkContext().broadcast(table.encryption());
-
-    return new StreamingWriter(table, io, encryptionManager, options, queryId, mode, appId, writeSchema, dsStruct);
+    return new StreamingWriter(lazySparkSession(), table, options, queryId, mode, appId, writeSchema, dsStruct);
   }
 
   @Override
@@ -164,13 +150,6 @@ public class IcebergSource implements DataSourceV2, ReadSupport, WriteSupport, D
       this.lazySpark = SparkSession.builder().getOrCreate();
     }
     return lazySpark;
-  }
-
-  private JavaSparkContext lazySparkContext() {
-    if (lazySparkContext == null) {
-      this.lazySparkContext = new JavaSparkContext(lazySparkSession().sparkContext());
-    }
-    return lazySparkContext;
   }
 
   private Configuration lazyBaseConf() {

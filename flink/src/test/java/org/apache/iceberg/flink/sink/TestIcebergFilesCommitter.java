@@ -52,6 +52,7 @@ import org.apache.iceberg.TableTestBase;
 import org.apache.iceberg.exceptions.ValidationException;
 import org.apache.iceberg.flink.FlinkSchemaUtil;
 import org.apache.iceberg.flink.SimpleDataUtil;
+import org.apache.iceberg.flink.TestHelpers;
 import org.apache.iceberg.flink.TestTableLoader;
 import org.apache.iceberg.io.FileAppenderFactory;
 import org.apache.iceberg.io.WriteResult;
@@ -66,6 +67,7 @@ import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
 import static org.apache.iceberg.TableProperties.DEFAULT_FILE_FORMAT;
+import static org.apache.iceberg.flink.sink.IcebergFilesCommitter.MAX_CONTINUOUS_EMPTY_COMMITS;
 import static org.apache.iceberg.flink.sink.ManifestOutputFileFactory.FLINK_MANIFEST_LOCATION;
 
 @RunWith(Parameterized.class)
@@ -109,6 +111,7 @@ public class TestIcebergFilesCommitter extends TableTestBase {
     table.updateProperties()
         .set(DEFAULT_FILE_FORMAT, format.name())
         .set(FLINK_MANIFEST_LOCATION, flinkManifestFolder.getAbsolutePath())
+        .set(MAX_CONTINUOUS_EMPTY_COMMITS, "1")
         .commit();
   }
 
@@ -136,6 +139,30 @@ public class TestIcebergFilesCommitter extends TableTestBase {
 
         assertSnapshotSize(i);
         assertMaxCommittedCheckpointId(jobId, checkpointId);
+      }
+    }
+  }
+
+  @Test
+  public void testMaxContinuousEmptyCommits() throws Exception {
+    table.updateProperties()
+        .set(MAX_CONTINUOUS_EMPTY_COMMITS, "3")
+        .commit();
+
+    JobID jobId = new JobID();
+    long checkpointId = 0;
+    long timestamp = 0;
+    try (OneInputStreamOperatorTestHarness<WriteResult, Void> harness = createStreamSink(jobId)) {
+      harness.setup();
+      harness.open();
+
+      assertSnapshotSize(0);
+
+      for (int i = 1; i <= 9; i++) {
+        harness.snapshot(++checkpointId, ++timestamp);
+        harness.notifyOfCompletedCheckpoint(checkpointId);
+
+        assertSnapshotSize(i / 3);
       }
     }
   }
@@ -578,7 +605,7 @@ public class TestIcebergFilesCommitter extends TableTestBase {
       // 2. Read the data files from manifests and assert.
       List<DataFile> dataFiles = FlinkManifestUtil.readDataFiles(createTestingManifestFile(manifestPath), table.io());
       Assert.assertEquals(1, dataFiles.size());
-      TestFlinkManifest.checkContentFile(dataFile1, dataFiles.get(0));
+      TestHelpers.assertEquals(dataFile1, dataFiles.get(0));
 
       // 3. notifyCheckpointComplete for checkpoint#1
       harness.notifyOfCompletedCheckpoint(checkpoint);
@@ -619,7 +646,7 @@ public class TestIcebergFilesCommitter extends TableTestBase {
       // 2. Read the data files from manifests and assert.
       List<DataFile> dataFiles = FlinkManifestUtil.readDataFiles(createTestingManifestFile(manifestPath), table.io());
       Assert.assertEquals(1, dataFiles.size());
-      TestFlinkManifest.checkContentFile(dataFile1, dataFiles.get(0));
+      TestHelpers.assertEquals(dataFile1, dataFiles.get(0));
 
       // 3. notifyCheckpointComplete for checkpoint#1
       harness.notifyOfCompletedCheckpoint(checkpoint);

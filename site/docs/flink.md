@@ -110,7 +110,7 @@ CREATE CATALOG hive_catalog WITH (
 * `catalog-type`: Iceberg currently support `hive` or `hadoop` catalog type. (Required)
 * `uri`: The Hive metastore's thrift URI. (Required)
 * `clients`: The Hive metastore client pool size, default value is 2. (Optional)
-* `property-version`: Version number to describe the property version. This property can be used for backwards compatibility in case the property format changes. The currently property version is `1`. (Optional)
+* `property-version`: Version number to describe the property version. This property can be used for backwards compatibility in case the property format changes. The current property version is `1`. (Optional)
 * `warehouse`: The Hive warehouse location, users should specify this path if neither set the `hive-conf-dir` to specify a location containing a `hive-site.xml` configuration file nor add a correct `hive-site.xml` to classpath.
 * `hive-conf-dir`: Path to a directory containing a `hive-site.xml` configuration file which will be used to provide custom Hive configuration values. The value of `hive.metastore.warehouse.dir` from `<hive-conf-dir>/hive-site.xml` (or hive configure file from classpath) will be overwrote with the `warehouse` value if setting both `hive-conf-dir` and `warehouse` when creating iceberg catalog.
 
@@ -342,12 +342,12 @@ This example will read incremental records which start from snapshot-id '3821550
 
 ```java
 StreamExecutionEnvironment env = StreamExecutionEnvironment.createLocalEnvironment();
-TableLoader tableLoader = TableLoader.fromHadooptable("hdfs://nn:8020/warehouse/path");
+TableLoader tableLoader = TableLoader.fromHadoopTable("hdfs://nn:8020/warehouse/path");
 DataStream<RowData> stream = FlinkSource.forRowData()
      .env(env)
      .tableLoader(loader)
      .streaming(true)
-     .startSnapshotId(3821550127947089987)
+     .startSnapshotId(3821550127947089987L)
      .build();
 
 // Print all records to stdout.
@@ -373,11 +373,10 @@ StreamExecutionEnvironment env = ...;
 
 DataStream<RowData> input = ... ;
 Configuration hadoopConf = new Configuration();
-TableLoader tableLoader = TableLoader.fromHadooptable("hdfs://nn:8020/warehouse/path");
+TableLoader tableLoader = TableLoader.fromHadoopTable("hdfs://nn:8020/warehouse/path", hadoopConf);
 
 FlinkSink.forRowData(input)
     .tableLoader(tableLoader)
-    .hadoopConf(hadoopConf)
     .build();
 
 env.execute("Test Iceberg DataStream");
@@ -394,12 +393,11 @@ StreamExecutionEnvironment env = ...;
 
 DataStream<RowData> input = ... ;
 Configuration hadoopConf = new Configuration();
-TableLoader tableLoader = TableLoader.fromHadooptable("hdfs://nn:8020/warehouse/path");
+TableLoader tableLoader = TableLoader.fromHadoopTable("hdfs://nn:8020/warehouse/path", hadoopConf);
 
 FlinkSink.forRowData(input)
     .tableLoader(tableLoader)
     .overwrite(true)
-    .hadoopConf(hadoopConf)
     .build();
 
 env.execute("Test Iceberg DataStream");
@@ -416,7 +414,7 @@ Iceberg provides API to rewrite small files into large files by submitting flink
 ```java
 import org.apache.iceberg.flink.actions.Actions;
 
-TableLoader tableLoader = TableLoader.fromHadooptable("hdfs://nn:8020/warehouse/path");
+TableLoader tableLoader = TableLoader.fromHadoopTable("hdfs://nn:8020/warehouse/path");
 Table table = tableLoader.loadTable();
 RewriteDataFilesActionResult result = Actions.forTable(table)
         .rewriteDataFiles()

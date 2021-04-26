@@ -23,11 +23,13 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hive.conf.HiveConf;
 import org.apache.hadoop.hive.metastore.HiveMetaStoreClient;
 import org.apache.hadoop.hive.metastore.api.MetaException;
+import org.apache.iceberg.ClientPoolImpl;
 import org.apache.iceberg.common.DynConstructors;
+import org.apache.iceberg.relocated.com.google.common.annotations.VisibleForTesting;
 import org.apache.thrift.TException;
 import org.apache.thrift.transport.TTransportException;
 
-public class HiveClientPool extends ClientPool<HiveMetaStoreClient, TException> {
+public class HiveClientPool extends ClientPoolImpl<HiveMetaStoreClient, TException> {
 
   // use appropriate ctor depending on whether we're working with Hive2 or Hive3 dependencies
   // we need to do this because there is a breaking API change between Hive2 and Hive3
@@ -41,6 +43,7 @@ public class HiveClientPool extends ClientPool<HiveMetaStoreClient, TException> 
   public HiveClientPool(int poolSize, Configuration conf) {
     super(poolSize, TTransportException.class);
     this.hiveConf = new HiveConf(conf, HiveClientPool.class);
+    this.hiveConf.addResource(conf);
   }
 
   @Override
@@ -88,5 +91,10 @@ public class HiveClientPool extends ClientPool<HiveMetaStoreClient, TException> 
   @Override
   protected void close(HiveMetaStoreClient client) {
     client.close();
+  }
+
+  @VisibleForTesting
+  HiveConf hiveConf() {
+    return hiveConf;
   }
 }
