@@ -41,6 +41,7 @@ import software.amazon.awssdk.services.glue.model.CreateTableRequest;
 import software.amazon.awssdk.services.glue.model.EntityNotFoundException;
 import software.amazon.awssdk.services.glue.model.GetTableRequest;
 import software.amazon.awssdk.services.glue.model.GetTableResponse;
+import software.amazon.awssdk.services.glue.model.StorageDescriptor;
 import software.amazon.awssdk.services.glue.model.Table;
 import software.amazon.awssdk.services.glue.model.TableInput;
 import software.amazon.awssdk.services.glue.model.UpdateTableRequest;
@@ -111,7 +112,7 @@ class GlueTableOperations extends BaseMetastoreTableOperations {
       Table glueTable = getGlueTable();
       checkMetadataLocation(glueTable, base);
       Map<String, String> properties = prepareProperties(glueTable, newMetadataLocation);
-      persistGlueTable(glueTable, properties);
+      persistGlueTable(glueTable, properties, IcebergToGlueConverter.toStorageDescriptor(metadata));
       commitStatus = CommitStatus.SUCCESS;
     } catch (ConcurrentModificationException e) {
       throw new CommitFailedException(e, "Cannot commit %s because Glue detected concurrent update", tableName());
@@ -179,7 +180,7 @@ class GlueTableOperations extends BaseMetastoreTableOperations {
   }
 
   @VisibleForTesting
-  void persistGlueTable(Table glueTable, Map<String, String> parameters) {
+  void persistGlueTable(Table glueTable, Map<String, String> parameters, StorageDescriptor storageDescriptor) {
     if (glueTable != null) {
       LOG.debug("Committing existing Glue table: {}", tableName());
       glue.updateTable(UpdateTableRequest.builder()
@@ -190,6 +191,7 @@ class GlueTableOperations extends BaseMetastoreTableOperations {
               .name(tableName)
               .tableType(GLUE_EXTERNAL_TABLE_TYPE)
               .parameters(parameters)
+              .storageDescriptor(storageDescriptor)
               .build())
           .build());
     } else {
@@ -201,6 +203,7 @@ class GlueTableOperations extends BaseMetastoreTableOperations {
               .name(tableName)
               .tableType(GLUE_EXTERNAL_TABLE_TYPE)
               .parameters(parameters)
+              .storageDescriptor(storageDescriptor)
               .build())
           .build());
     }

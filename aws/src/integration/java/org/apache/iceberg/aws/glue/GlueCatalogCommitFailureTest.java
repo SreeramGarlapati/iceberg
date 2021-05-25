@@ -206,7 +206,8 @@ public class GlueCatalogCommitFailureTest extends GlueTestBase {
       Map<String, String> mapProperties = i.getArgument(1, Map.class);
       realOps.persistGlueTable(
           i.getArgument(0, software.amazon.awssdk.services.glue.model.Table.class),
-          mapProperties);
+          mapProperties,
+          i.getArgument(2, software.amazon.awssdk.services.glue.model.StorageDescriptor.class));
 
       // new metadata location is stored in map property, and used for locking
       String newMetadataLocation = mapProperties.get(BaseMetastoreTableOperations.METADATA_LOCATION_PROP);
@@ -217,7 +218,7 @@ public class GlueCatalogCommitFailureTest extends GlueTestBase {
       table.refresh();
       table.updateSchema().addColumn("newCol", Types.IntegerType.get()).commit();
       throw new SdkBaseException("Datacenter on fire");
-    }).when(spyOperations).persistGlueTable(Matchers.any(), Matchers.anyMap());
+    }).when(spyOperations).persistGlueTable(Matchers.any(), Matchers.anyMap(), Matchers.any());
   }
 
   private Table setupTable() {
@@ -243,9 +244,10 @@ public class GlueCatalogCommitFailureTest extends GlueTestBase {
     Mockito.doAnswer(i -> {
       realOps.persistGlueTable(
           i.getArgument(0, software.amazon.awssdk.services.glue.model.Table.class),
-          i.getArgument(1, Map.class));
+          i.getArgument(1, Map.class),
+          i.getArgument(2, software.amazon.awssdk.services.glue.model.StorageDescriptor.class));
       throw new SdkBaseException("Datacenter on fire");
-    }).when(spyOps).persistGlueTable(Matchers.any(), Matchers.anyMap());
+    }).when(spyOps).persistGlueTable(Matchers.any(), Matchers.anyMap(), Matchers.any());
   }
 
   private void failCommitAndThrowException(GlueTableOperations spyOps) {
@@ -254,7 +256,7 @@ public class GlueCatalogCommitFailureTest extends GlueTestBase {
 
   private void failCommitAndThrowException(GlueTableOperations spyOps, Exception exceptionToThrow) {
     Mockito.doThrow(exceptionToThrow)
-        .when(spyOps).persistGlueTable(Matchers.any(), Matchers.anyMap());
+        .when(spyOps).persistGlueTable(Matchers.any(), Matchers.anyMap(), Matchers.any());
   }
 
   private void breakFallbackCatalogCommitCheck(GlueTableOperations spyOperations) {
