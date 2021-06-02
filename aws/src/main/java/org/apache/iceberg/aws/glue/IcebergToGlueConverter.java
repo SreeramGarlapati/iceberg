@@ -19,14 +19,18 @@
 
 package org.apache.iceberg.aws.glue;
 
+import java.util.ArrayList;
 import java.util.Map;
 import java.util.regex.Pattern;
+import org.apache.iceberg.TableMetadata;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.exceptions.NoSuchNamespaceException;
 import org.apache.iceberg.exceptions.NoSuchTableException;
 import org.apache.iceberg.exceptions.ValidationException;
 import software.amazon.awssdk.services.glue.model.DatabaseInput;
+import software.amazon.awssdk.services.glue.model.SerDeInfo;
+import software.amazon.awssdk.services.glue.model.StorageDescriptor;
 
 class IcebergToGlueConverter {
 
@@ -131,5 +135,20 @@ class IcebergToGlueConverter {
   static void validateTableIdentifier(TableIdentifier tableIdentifier) {
     validateNamespace(tableIdentifier.namespace());
     validateTableName(tableIdentifier.name());
+  }
+
+  /**
+   * Uses the Iceberg table metadata to build the storage descriptor for corresponding glue table
+   * @param metadata Iceberg table metadata
+   * @return Glue Table Storage Descriptor
+   */
+  static StorageDescriptor toStorageDescriptor(TableMetadata metadata)  {
+    return StorageDescriptor.builder()
+            .columns(new ArrayList<>())
+            .location(metadata.location())
+            .serdeInfo(SerDeInfo.builder()
+                    .serializationLibrary("org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe")
+                    .build())
+            .build();
   }
 }
