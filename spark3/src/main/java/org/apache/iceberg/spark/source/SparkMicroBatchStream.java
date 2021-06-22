@@ -194,6 +194,7 @@ public class SparkMicroBatchStream implements MicroBatchStream {
   private long snapshotAfter(long snapshotId) {
     Snapshot snapshotAfter = SnapshotUtil.snapshotAfter(table, snapshotId);
 
+    // TODO: Add options to ignore delete and replace instead of throwing 
     Preconditions.checkState(snapshotAfter.operation().equals(DataOperations.APPEND),
             "Invalid Snapshot operation: %s, only APPEND is allowed.", snapshotAfter.operation());
 
