@@ -62,8 +62,6 @@ import org.apache.spark.sql.connector.read.streaming.MicroBatchStream;
 import org.apache.spark.sql.connector.read.streaming.Offset;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 
-import javax.xml.crypto.Data;
-
 import static org.apache.iceberg.TableProperties.SPLIT_LOOKBACK;
 import static org.apache.iceberg.TableProperties.SPLIT_LOOKBACK_DEFAULT;
 import static org.apache.iceberg.TableProperties.SPLIT_OPEN_FILE_COST;
@@ -83,8 +81,7 @@ public class SparkMicroBatchStream implements MicroBatchStream {
   private final Long splitOpenFileCost;
   private final boolean localityPreferred;
   private final StreamingOffset initialOffset;
-  private final boolean skipDelete;
-  private final boolean skipReplace;
+  private final Set<String> skippableDataOperations;
 
   SparkMicroBatchStream(JavaSparkContext sparkContext, Table table, boolean caseSensitive,
                         Schema expectedSchema, CaseInsensitiveStringMap options, String checkpointLocation) {
@@ -107,8 +104,14 @@ public class SparkMicroBatchStream implements MicroBatchStream {
     InitialOffsetStore initialOffsetStore = new InitialOffsetStore(table, checkpointLocation);
     this.initialOffset = initialOffsetStore.initialOffset();
 
-    this.skipDelete = Spark3Util.propertyAsBoolean(options, SparkReadOptions.READ_STREAM_SKIP_DELETE, false);
-    this.skipReplace = Spark3Util.propertyAsBoolean(options, SparkReadOptions.READ_STREAM_SKIP_REPLACE, false);
+    this.skippableDataOperations = Sets.newHashSet();
+    if (Spark3Util.propertyAsBoolean(options, SparkReadOptions.READ_STREAM_SKIP_DELETE, false)) {
+      this.skippableDataOperations.add(DataOperations.DELETE);
+    }
+
+    if (Spark3Util.propertyAsBoolean(options, SparkReadOptions.READ_STREAM_SKIP_REPLACE, false)) {
+      this.skippableDataOperations.add(DataOperations.REPLACE);
+    }
   }
 
   @Override
@@ -189,7 +192,13 @@ public class SparkMicroBatchStream implements MicroBatchStream {
         currentOffset = batchStartOffset;
       } else {
         Snapshot snapshotAfter = SnapshotUtil.snapshotAfter(table, currentOffset.snapshotId());
-        boolean shouldSkip = shouldSkip(snapshotAfter);
+        boolean shouldSkip = skippableDataOperations.contains(snapshotAfter.operation());
+
+        // TODO: fix error message
+        Preconditions.checkState(
+            snapshotAfter.operation().equals(DataOperations.APPEND) || shouldSkip,
+            "Invalid Snapshot operation: %s, only APPEND is allowed.", snapshotAfter.operation());
+
         currentOffset = new StreamingOffset(snapshotAfter.snapshotId(), 0L, false);
 
         if (shouldSkip) {
@@ -206,38 +215,6 @@ public class SparkMicroBatchStream implements MicroBatchStream {
     } while (currentOffset.snapshotId() != endOffset.snapshotId());
 
     return fileScanTasks;
-  }
-
-  private boolean shouldSkip(Snapshot snapshot)
-  {
-    if (snapshot.operation().equals(DataOperations.DELETE)) {
-      return shouldSkipDelete(snapshot);
-    } else if (snapshot.operation().equals(DataOperations.REPLACE)) {
-      return shouldSkipReplace(snapshot);
-    }
-
-    Preconditions.checkState(
-            snapshot.operation().equals(DataOperations.APPEND),
-            "Invalid Snapshot operation: %s, only APPEND is allowed.", snapshot.operation());
-    return false;
-  }
-
-  private boolean shouldSkipDelete(Snapshot snapshot)
-  {
-    Preconditions.checkState(skipDelete,
-            "Invalid Snapshot operation: %s, only APPEND is allowed. To skip delete, set Spark Option %s",
-            snapshot.operation(),
-            SparkReadOptions.READ_STREAM_SKIP_DELETE);
-    return true;
-  }
-
-  private boolean shouldSkipReplace(Snapshot snapshot)
-  {
-    Preconditions.checkState(skipReplace,
-            "Invalid Snapshot operation: %s, only APPEND is allowed. To skip replace, set Spark Option %s",
-            snapshot.operation(),
-            SparkReadOptions.READ_STREAM_SKIP_REPLACE);
-    return true;
   }
 
   private static class InitialOffsetStore {
