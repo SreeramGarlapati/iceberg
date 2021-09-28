@@ -235,12 +235,14 @@ public class SparkMicroBatchStream implements MicroBatchStream {
     return table.currentSnapshot() != null;
   }
 
-  private static boolean isFutureStartTime(Table table, long streamStartTimeStampMillis) { return table.currentSnapshot().timestampMillis() < streamStartTimeStampMillis;
+  private static boolean isFutureStartTime(Table table, long streamStartTimeStampMillis) {
+    return table.currentSnapshot().timestampMillis() < streamStartTimeStampMillis;
   }
 
   private static StreamingOffset initialFutureStartOffset(Table table) {
     Preconditions.checkNotNull(table, "Cannot process future start offset with invalid table input.");
-    return new StreamingOffset(table.currentSnapshot().snapshotId(), Iterables.size(table.currentSnapshot().addedFiles()) + 1, false);
+    Snapshot latestSnapshot = table.currentSnapshot();
+    return new StreamingOffset(latestSnapshot.snapshotId(), Iterables.size(latestSnapshot.addedFiles()) + 1, false);
   }
 
   private static class InitialOffsetStore {
