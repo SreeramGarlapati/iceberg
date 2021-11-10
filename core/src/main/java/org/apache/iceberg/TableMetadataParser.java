@@ -164,12 +164,8 @@ public class TableMetadataParser {
     generator.writeNumberField(LAST_UPDATED_MILLIS, metadata.lastUpdatedMillis());
     generator.writeNumberField(LAST_COLUMN_ID, metadata.lastColumnId());
 
-    // for older readers, continue writing the current schema as "schema".
-    // this is only needed for v1 because support for schemas and current-schema-id is required in v2 and later.
-    if (metadata.formatVersion() == 1) {
-      generator.writeFieldName(SCHEMA);
-      SchemaParser.toJson(metadata.schema(), generator);
-    }
+    generator.writeFieldName(SCHEMA);
+    SchemaParser.toJson(metadata.schema(), generator);
 
     // write the current schema ID and schema list
     generator.writeNumberField(CURRENT_SCHEMA_ID, metadata.currentSchemaId());
@@ -179,11 +175,8 @@ public class TableMetadataParser {
     }
     generator.writeEndArray();
 
-    // for older readers, continue writing the default spec as "partition-spec"
-    if (metadata.formatVersion() == 1) {
-      generator.writeFieldName(PARTITION_SPEC);
-      PartitionSpecParser.toJsonFields(metadata.spec(), generator);
-    }
+    generator.writeFieldName(PARTITION_SPEC);
+    PartitionSpecParser.toJsonFields(metadata.spec(), generator);
 
     // write the default spec ID and spec list
     generator.writeNumberField(DEFAULT_SPEC_ID, metadata.defaultSpecId());
