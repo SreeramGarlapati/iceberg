@@ -54,6 +54,17 @@ public interface Table {
   TableScan newScan();
 
   /**
+   * Create a new {@link IncrementalAppendScan scan} for this table.
+   * <p>
+   * Once a scan is created, it can be refined to project columns and filter data.
+   *
+   * @return an incremental scan for appends only snapshots
+   */
+  default IncrementalAppendScan newIncrementalAppendScan() {
+    throw new UnsupportedOperationException("Incremental append scan is not supported");
+  }
+
+  /**
    * Return the {@link Schema schema} for this table.
    *
    * @return this table's schema
@@ -286,4 +297,25 @@ public interface Table {
    * Returns a {@link LocationProvider} to provide locations for new data files.
    */
   LocationProvider locationProvider();
+
+  /**
+   * Returns the current refs for the table
+   *
+   * @return the current refs for the table
+   */
+  Map<String, SnapshotRef> refs();
+
+  /**
+   * Returns the snapshot referenced by the given name or null if no such reference exists.
+   *
+   * @return the snapshot which is referenced by the given name or null if no such reference exists.
+   */
+  default Snapshot snapshot(String name) {
+    SnapshotRef ref = refs().get(name);
+    if (ref != null) {
+      return snapshot(ref.snapshotId());
+    }
+
+    return null;
+  }
 }

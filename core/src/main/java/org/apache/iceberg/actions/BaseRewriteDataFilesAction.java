@@ -32,11 +32,13 @@ import org.apache.iceberg.RewriteFiles;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.encryption.EncryptionManager;
+import org.apache.iceberg.exceptions.CommitStateUnknownException;
 import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.CloseableIterator;
 import org.apache.iceberg.io.FileIO;
+import org.apache.iceberg.relocated.com.google.common.annotations.VisibleForTesting;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
 import org.apache.iceberg.relocated.com.google.common.collect.ListMultimap;
@@ -131,7 +133,7 @@ public abstract class BaseRewriteDataFilesAction<ThisT>
    * @return this for method chaining
    */
   public BaseRewriteDataFilesAction<ThisT> outputSpecId(int specId) {
-    Preconditions.checkArgument(table.specs().containsKey(specId), "Invalid spec id %d", specId);
+    Preconditions.checkArgument(table.specs().containsKey(specId), "Invalid spec id %s", specId);
     this.spec = table.specs().get(specId);
     return this;
   }
@@ -143,7 +145,7 @@ public abstract class BaseRewriteDataFilesAction<ThisT>
    * @return this for method chaining
    */
   public BaseRewriteDataFilesAction<ThisT> targetSizeInBytes(long targetSize) {
-    Preconditions.checkArgument(targetSize > 0L, "Invalid target rewrite data file size in bytes %d",
+    Preconditions.checkArgument(targetSize > 0L, "Invalid target rewrite data file size in bytes %s",
         targetSize);
     this.targetSizeInBytes = targetSize;
     return this;
@@ -161,7 +163,7 @@ public abstract class BaseRewriteDataFilesAction<ThisT>
    * @return this for method chaining
    */
   public BaseRewriteDataFilesAction<ThisT> splitLookback(int lookback) {
-    Preconditions.checkArgument(lookback > 0L, "Invalid split lookback %d", lookback);
+    Preconditions.checkArgument(lookback > 0L, "Invalid split lookback %s", lookback);
     this.splitLookback = lookback;
     return this;
   }
@@ -177,7 +179,7 @@ public abstract class BaseRewriteDataFilesAction<ThisT>
    * @return this for method chaining
    */
   public BaseRewriteDataFilesAction<ThisT> splitOpenFileCost(long openFileCost) {
-    Preconditions.checkArgument(openFileCost > 0L, "Invalid split openFileCost %d", openFileCost);
+    Preconditions.checkArgument(openFileCost > 0L, "Invalid split openFileCost %s", openFileCost);
     this.splitOpenFileCost = openFileCost;
     return this;
   }
@@ -271,11 +273,12 @@ public abstract class BaseRewriteDataFilesAction<ThisT>
   private void replaceDataFiles(Iterable<DataFile> deletedDataFiles, Iterable<DataFile> addedDataFiles,
                                 long startingSnapshotId) {
     try {
-      RewriteFiles rewriteFiles = table.newRewrite()
-          .validateFromSnapshot(startingSnapshotId)
-          .rewriteFiles(Sets.newHashSet(deletedDataFiles), Sets.newHashSet(addedDataFiles));
-      commit(rewriteFiles);
+      doReplace(deletedDataFiles, addedDataFiles, startingSnapshotId);
+    } catch (CommitStateUnknownException e) {
+      LOG.warn("Commit state unknown, cannot clean up files that may have been committed", e);
+      throw e;
     } catch (Exception e) {
+      LOG.warn("Failed to commit rewrite, cleaning up rewritten files", e);
       Tasks.foreach(Iterables.transform(addedDataFiles, f -> f.path().toString()))
           .noRetry()
           .suppressFailureWhenFinished()
@@ -283,6 +286,15 @@ public abstract class BaseRewriteDataFilesAction<ThisT>
           .run(fileIO::deleteFile);
       throw e;
     }
+  }
+
+  @VisibleForTesting
+  void doReplace(Iterable<DataFile> deletedDataFiles, Iterable<DataFile> addedDataFiles,
+      long startingSnapshotId) {
+    RewriteFiles rewriteFiles = table.newRewrite()
+        .validateFromSnapshot(startingSnapshotId)
+        .rewriteFiles(Sets.newHashSet(deletedDataFiles), Sets.newHashSet(addedDataFiles));
+    commit(rewriteFiles);
   }
 
   private boolean isPartialFileScan(CombinedScanTask task) {

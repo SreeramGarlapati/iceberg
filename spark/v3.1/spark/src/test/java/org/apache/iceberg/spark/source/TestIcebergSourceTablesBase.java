@@ -33,7 +33,7 @@ import org.apache.iceberg.Schema;
 import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableProperties;
-import org.apache.iceberg.actions.Actions;
+import org.apache.iceberg.actions.DeleteOrphanFiles;
 import org.apache.iceberg.avro.Avro;
 import org.apache.iceberg.avro.AvroSchemaUtil;
 import org.apache.iceberg.catalog.TableIdentifier;
@@ -48,18 +48,23 @@ import org.apache.iceberg.spark.SparkReadOptions;
 import org.apache.iceberg.spark.SparkSchemaUtil;
 import org.apache.iceberg.spark.SparkTableUtil;
 import org.apache.iceberg.spark.SparkTestBase;
+import org.apache.iceberg.spark.actions.SparkActions;
 import org.apache.iceberg.spark.data.TestHelpers;
 import org.apache.iceberg.types.Types;
 import org.apache.spark.SparkException;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Encoders;
 import org.apache.spark.sql.Row;
+import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.SaveMode;
+import org.apache.spark.sql.types.StructType;
 import org.junit.Assert;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
+import static org.apache.iceberg.ManifestContent.DATA;
+import static org.apache.iceberg.ManifestContent.DELETES;
 import static org.apache.iceberg.types.Types.NestedField.optional;
 import static org.apache.iceberg.types.Types.NestedField.required;
 
@@ -68,6 +73,17 @@ public abstract class TestIcebergSourceTablesBase extends SparkTestBase {
   private static final Schema SCHEMA = new Schema(
       optional(1, "id", Types.IntegerType.get()),
       optional(2, "data", Types.StringType.get())
+  );
+
+  private static final Schema SCHEMA2 = new Schema(
+      optional(1, "id", Types.IntegerType.get()),
+      optional(2, "data", Types.StringType.get()),
+      optional(3, "category", Types.StringType.get())
+  );
+
+  private static final Schema SCHEMA3 = new Schema(
+      optional(1, "id", Types.IntegerType.get()),
+      optional(3, "category", Types.StringType.get())
   );
 
   private static final PartitionSpec SPEC = PartitionSpec.builderFor(SCHEMA).identity("id").build();
@@ -882,13 +898,18 @@ public abstract class TestIcebergSourceTablesBase extends SparkTestBase {
     GenericRecordBuilder summaryBuilder = new GenericRecordBuilder(AvroSchemaUtil.convert(
         manifestTable.schema().findType("partition_summaries.element").asStructType(), "partition_summary"));
     List<GenericData.Record> expected = Lists.transform(table.currentSnapshot().allManifests(), manifest ->
-        builder.set("path", manifest.path())
+        builder
+            .set("content", manifest.content().id())
+            .set("path", manifest.path())
             .set("length", manifest.length())
             .set("partition_spec_id", manifest.partitionSpecId())
             .set("added_snapshot_id", manifest.snapshotId())
-            .set("added_data_files_count", manifest.addedFilesCount())
-            .set("existing_data_files_count", manifest.existingFilesCount())
-            .set("deleted_data_files_count", manifest.deletedFilesCount())
+            .set("added_data_files_count", manifest.content() == DATA ? manifest.addedFilesCount() : 0)
+            .set("existing_data_files_count", manifest.content() == DATA ? manifest.existingFilesCount() : 0)
+            .set("deleted_data_files_count", manifest.content() == DATA ? manifest.deletedFilesCount() : 0)
+            .set("added_delete_files_count", manifest.content() == DELETES ? manifest.addedFilesCount() : 0)
+            .set("existing_delete_files_count", manifest.content() == DELETES ? manifest.existingFilesCount() : 0)
+            .set("deleted_delete_files_count", manifest.content() == DELETES ? manifest.deletedFilesCount() : 0)
             .set("partition_summaries", Lists.transform(manifest.partitions(), partition ->
                 summaryBuilder
                     .set("contains_null", true)
@@ -997,13 +1018,18 @@ public abstract class TestIcebergSourceTablesBase extends SparkTestBase {
     GenericRecordBuilder summaryBuilder = new GenericRecordBuilder(AvroSchemaUtil.convert(
         manifestTable.schema().findType("partition_summaries.element").asStructType(), "partition_summary"));
     List<GenericData.Record> expected = Lists.newArrayList(Iterables.transform(manifests, manifest ->
-        builder.set("path", manifest.path())
+        builder
+            .set("content", manifest.content().id())
+            .set("path", manifest.path())
             .set("length", manifest.length())
             .set("partition_spec_id", manifest.partitionSpecId())
             .set("added_snapshot_id", manifest.snapshotId())
-            .set("added_data_files_count", manifest.addedFilesCount())
-            .set("existing_data_files_count", manifest.existingFilesCount())
-            .set("deleted_data_files_count", manifest.deletedFilesCount())
+            .set("added_data_files_count", manifest.content() == DATA ? manifest.addedFilesCount() : 0)
+            .set("existing_data_files_count", manifest.content() == DATA ? manifest.existingFilesCount() : 0)
+            .set("deleted_data_files_count", manifest.content() == DATA ? manifest.deletedFilesCount() : 0)
+            .set("added_delete_files_count", manifest.content() == DELETES ? manifest.addedFilesCount() : 0)
+            .set("existing_delete_files_count", manifest.content() == DELETES ? manifest.existingFilesCount() : 0)
+            .set("deleted_delete_files_count", manifest.content() == DELETES ? manifest.deletedFilesCount() : 0)
             .set("partition_summaries", Lists.transform(manifest.partitions(), partition ->
                 summaryBuilder
                     .set("contains_null", false)
@@ -1097,11 +1123,13 @@ public abstract class TestIcebergSourceTablesBase extends SparkTestBase {
         .set("partition", partitionBuilder.set("id", 1).build())
         .set("record_count", 1L)
         .set("file_count", 1)
+        .set("spec_id", 0)
         .build());
     expected.add(builder
         .set("partition", partitionBuilder.set("id", 2).build())
         .set("record_count", 1L)
         .set("file_count", 1)
+        .set("spec_id", 0)
         .build());
 
     Assert.assertEquals("Partitions table should have two rows", 2, expected.size());
@@ -1142,6 +1170,223 @@ public abstract class TestIcebergSourceTablesBase extends SparkTestBase {
   }
 
   @Test
+  public synchronized void testSnapshotReadAfterAddColumn() {
+    TableIdentifier tableIdentifier = TableIdentifier.of("db", "table");
+    Table table = createTable(tableIdentifier, SCHEMA, PartitionSpec.unpartitioned());
+
+    List<Row> originalRecords = Lists.newArrayList(
+        RowFactory.create(1, "x"),
+        RowFactory.create(2, "y"),
+        RowFactory.create(3, "z"));
+
+    StructType originalSparkSchema = SparkSchemaUtil.convert(SCHEMA);
+    Dataset<Row> inputDf = spark.createDataFrame(originalRecords, originalSparkSchema);
+    inputDf.select("id", "data").write()
+        .format("iceberg")
+        .mode(SaveMode.Append)
+        .save(loadLocation(tableIdentifier));
+
+    table.refresh();
+
+    Dataset<Row> resultDf = spark.read()
+        .format("iceberg")
+        .load(loadLocation(tableIdentifier));
+    Assert.assertEquals("Records should match", originalRecords,
+        resultDf.orderBy("id").collectAsList());
+
+    Snapshot snapshotBeforeAddColumn = table.currentSnapshot();
+
+    table.updateSchema().addColumn("category", Types.StringType.get()).commit();
+
+    List<Row> newRecords = Lists.newArrayList(
+        RowFactory.create(4, "xy", "B"),
+        RowFactory.create(5, "xyz", "C"));
+
+    StructType newSparkSchema = SparkSchemaUtil.convert(SCHEMA2);
+    Dataset<Row> inputDf2 = spark.createDataFrame(newRecords, newSparkSchema);
+    inputDf2.select("id", "data", "category").write()
+        .format("iceberg")
+        .mode(SaveMode.Append)
+        .save(loadLocation(tableIdentifier));
+
+    table.refresh();
+
+    List<Row> updatedRecords = Lists.newArrayList(
+        RowFactory.create(1, "x", null),
+        RowFactory.create(2, "y", null),
+        RowFactory.create(3, "z", null),
+        RowFactory.create(4, "xy", "B"),
+        RowFactory.create(5, "xyz", "C"));
+
+    Dataset<Row> resultDf2 = spark.read()
+        .format("iceberg")
+        .load(loadLocation(tableIdentifier));
+    Assert.assertEquals("Records should match", updatedRecords,
+        resultDf2.orderBy("id").collectAsList());
+
+    Dataset<Row> resultDf3 = spark.read()
+        .format("iceberg")
+        .option(SparkReadOptions.SNAPSHOT_ID, snapshotBeforeAddColumn.snapshotId())
+        .load(loadLocation(tableIdentifier));
+    Assert.assertEquals("Records should match", originalRecords,
+        resultDf3.orderBy("id").collectAsList());
+    Assert.assertEquals("Schemas should match", originalSparkSchema, resultDf3.schema());
+  }
+
+  @Test
+  public synchronized void testSnapshotReadAfterDropColumn() {
+    TableIdentifier tableIdentifier = TableIdentifier.of("db", "table");
+    Table table = createTable(tableIdentifier, SCHEMA2, PartitionSpec.unpartitioned());
+
+    List<Row> originalRecords = Lists.newArrayList(
+        RowFactory.create(1, "x", "A"),
+        RowFactory.create(2, "y", "A"),
+        RowFactory.create(3, "z", "B"));
+
+    StructType originalSparkSchema = SparkSchemaUtil.convert(SCHEMA2);
+    Dataset<Row> inputDf = spark.createDataFrame(originalRecords, originalSparkSchema);
+    inputDf.select("id", "data", "category").write()
+        .format("iceberg")
+        .mode(SaveMode.Append)
+        .save(loadLocation(tableIdentifier));
+
+    table.refresh();
+
+    Dataset<Row> resultDf = spark.read()
+        .format("iceberg")
+        .load(loadLocation(tableIdentifier));
+    Assert.assertEquals("Records should match", originalRecords,
+        resultDf.orderBy("id").collectAsList());
+
+    long tsBeforeDropColumn = waitUntilAfter(System.currentTimeMillis());
+    table.updateSchema().deleteColumn("data").commit();
+    long tsAfterDropColumn = waitUntilAfter(System.currentTimeMillis());
+
+    List<Row> newRecords = Lists.newArrayList(
+        RowFactory.create(4, "B"),
+        RowFactory.create(5, "C"));
+
+    StructType newSparkSchema = SparkSchemaUtil.convert(SCHEMA3);
+    Dataset<Row> inputDf2 = spark.createDataFrame(newRecords, newSparkSchema);
+    inputDf2.select("id", "category").write()
+        .format("iceberg")
+        .mode(SaveMode.Append)
+        .save(loadLocation(tableIdentifier));
+
+    table.refresh();
+
+    List<Row> updatedRecords = Lists.newArrayList(
+        RowFactory.create(1, "A"),
+        RowFactory.create(2, "A"),
+        RowFactory.create(3, "B"),
+        RowFactory.create(4, "B"),
+        RowFactory.create(5, "C"));
+
+    Dataset<Row> resultDf2 = spark.read()
+        .format("iceberg")
+        .load(loadLocation(tableIdentifier));
+    Assert.assertEquals("Records should match", updatedRecords,
+        resultDf2.orderBy("id").collectAsList());
+
+    Dataset<Row> resultDf3 = spark.read()
+        .format("iceberg")
+        .option(SparkReadOptions.AS_OF_TIMESTAMP, tsBeforeDropColumn)
+        .load(loadLocation(tableIdentifier));
+    Assert.assertEquals("Records should match", originalRecords,
+        resultDf3.orderBy("id").collectAsList());
+    Assert.assertEquals("Schemas should match", originalSparkSchema, resultDf3.schema());
+
+    // At tsAfterDropColumn, there has been a schema change, but no new snapshot,
+    // so the snapshot as of tsAfterDropColumn is the same as that as of tsBeforeDropColumn.
+    Dataset<Row> resultDf4 = spark.read()
+        .format("iceberg")
+        .option(SparkReadOptions.AS_OF_TIMESTAMP, tsAfterDropColumn)
+        .load(loadLocation(tableIdentifier));
+    Assert.assertEquals("Records should match", originalRecords,
+        resultDf4.orderBy("id").collectAsList());
+    Assert.assertEquals("Schemas should match", originalSparkSchema, resultDf4.schema());
+  }
+
+  @Test
+  public synchronized void testSnapshotReadAfterAddAndDropColumn() {
+    TableIdentifier tableIdentifier = TableIdentifier.of("db", "table");
+    Table table = createTable(tableIdentifier, SCHEMA, PartitionSpec.unpartitioned());
+
+    List<Row> originalRecords = Lists.newArrayList(
+        RowFactory.create(1, "x"),
+        RowFactory.create(2, "y"),
+        RowFactory.create(3, "z"));
+
+    StructType originalSparkSchema = SparkSchemaUtil.convert(SCHEMA);
+    Dataset<Row> inputDf = spark.createDataFrame(originalRecords, originalSparkSchema);
+    inputDf.select("id", "data").write()
+        .format("iceberg")
+        .mode(SaveMode.Append)
+        .save(loadLocation(tableIdentifier));
+
+    table.refresh();
+
+    Dataset<Row> resultDf = spark.read()
+        .format("iceberg")
+        .load(loadLocation(tableIdentifier));
+    Assert.assertEquals("Records should match", originalRecords,
+        resultDf.orderBy("id").collectAsList());
+
+    Snapshot snapshotBeforeAddColumn = table.currentSnapshot();
+
+    table.updateSchema().addColumn("category", Types.StringType.get()).commit();
+
+    List<Row> newRecords = Lists.newArrayList(
+        RowFactory.create(4, "xy", "B"),
+        RowFactory.create(5, "xyz", "C"));
+
+    StructType sparkSchemaAfterAddColumn = SparkSchemaUtil.convert(SCHEMA2);
+    Dataset<Row> inputDf2 = spark.createDataFrame(newRecords, sparkSchemaAfterAddColumn);
+    inputDf2.select("id", "data", "category").write()
+        .format("iceberg")
+        .mode(SaveMode.Append)
+        .save(loadLocation(tableIdentifier));
+
+    table.refresh();
+
+    List<Row> updatedRecords = Lists.newArrayList(
+        RowFactory.create(1, "x", null),
+        RowFactory.create(2, "y", null),
+        RowFactory.create(3, "z", null),
+        RowFactory.create(4, "xy", "B"),
+        RowFactory.create(5, "xyz", "C"));
+
+    Dataset<Row> resultDf2 = spark.read()
+        .format("iceberg")
+        .load(loadLocation(tableIdentifier));
+    Assert.assertEquals("Records should match", updatedRecords,
+        resultDf2.orderBy("id").collectAsList());
+
+    table.updateSchema().deleteColumn("data").commit();
+
+    List<Row> recordsAfterDropColumn = Lists.newArrayList(
+        RowFactory.create(1, null),
+        RowFactory.create(2, null),
+        RowFactory.create(3, null),
+        RowFactory.create(4, "B"),
+        RowFactory.create(5, "C"));
+
+    Dataset<Row> resultDf3 = spark.read()
+        .format("iceberg")
+        .load(loadLocation(tableIdentifier));
+    Assert.assertEquals("Records should match", recordsAfterDropColumn,
+        resultDf3.orderBy("id").collectAsList());
+
+    Dataset<Row> resultDf4 = spark.read()
+        .format("iceberg")
+        .option(SparkReadOptions.SNAPSHOT_ID, snapshotBeforeAddColumn.snapshotId())
+        .load(loadLocation(tableIdentifier));
+    Assert.assertEquals("Records should match", originalRecords,
+        resultDf4.orderBy("id").collectAsList());
+    Assert.assertEquals("Schemas should match", originalSparkSchema, resultDf4.schema());
+  }
+
+  @Test
   public void testRemoveOrphanFilesActionSupport() throws InterruptedException {
     TableIdentifier tableIdentifier = TableIdentifier.of("db", "table");
     Table table = createTable(tableIdentifier, SCHEMA, PartitionSpec.unpartitioned());
@@ -1162,18 +1407,18 @@ public abstract class TestIcebergSourceTablesBase extends SparkTestBase {
     // sleep for 1 second to ensure files will be old enough
     Thread.sleep(1000);
 
-    Actions actions = Actions.forTable(table);
+    SparkActions actions = SparkActions.get();
 
-    List<String> result1 = actions.removeOrphanFiles()
+    DeleteOrphanFiles.Result result1 = actions.deleteOrphanFiles(table)
         .location(table.location() + "/metadata")
         .olderThan(System.currentTimeMillis())
         .execute();
-    Assert.assertTrue("Should not delete any metadata files", result1.isEmpty());
+    Assert.assertTrue("Should not delete any metadata files", Iterables.isEmpty(result1.orphanFileLocations()));
 
-    List<String> result2 = actions.removeOrphanFiles()
+    DeleteOrphanFiles.Result result2 = actions.deleteOrphanFiles(table)
         .olderThan(System.currentTimeMillis())
         .execute();
-    Assert.assertEquals("Should delete 1 data file", 1, result2.size());
+    Assert.assertEquals("Should delete 1 data file", 1, Iterables.size(result2.orphanFileLocations()));
 
     Dataset<Row> resultDF = spark.read().format("iceberg").load(loadLocation(tableIdentifier));
     List<SimpleRecord> actualRecords = resultDF

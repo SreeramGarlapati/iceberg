@@ -25,6 +25,7 @@ import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
+import org.apache.iceberg.FileContent;
 import org.apache.iceberg.HasTableOperations;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableMetadata;
@@ -40,11 +41,9 @@ import org.apache.iceberg.relocated.com.google.common.collect.Sets;
 import org.apache.iceberg.spark.JobGroupInfo;
 import org.apache.iceberg.util.PropertyUtil;
 import org.apache.iceberg.util.Tasks;
-import org.apache.spark.sql.Column;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
-import org.apache.spark.sql.functions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -58,7 +57,7 @@ import static org.apache.iceberg.TableProperties.GC_ENABLED_DEFAULT;
  * <p>
  * This action first leverages {@link org.apache.iceberg.ExpireSnapshots} to expire snapshots and then
  * uses metadata tables to find files that can be safely deleted. This is done by anti-joining two Datasets
- * that contain all manifest and data files before and after the expiration. The snapshot expiration
+ * that contain all manifest and content files before and after the expiration. The snapshot expiration
  * will be fully committed before any deletes are issued.
  * <p>
  * This operation performs a shuffle so the parallelism can be controlled through 'spark.sql.shuffle.partitions'.
@@ -68,16 +67,11 @@ import static org.apache.iceberg.TableProperties.GC_ENABLED_DEFAULT;
 @SuppressWarnings("UnnecessaryAnonymousClass")
 public class BaseExpireSnapshotsSparkAction
     extends BaseSparkAction<ExpireSnapshots, ExpireSnapshots.Result> implements ExpireSnapshots {
+
+  public static final String STREAM_RESULTS = "stream-results";
+  public static final boolean STREAM_RESULTS_DEFAULT = false;
+
   private static final Logger LOG = LoggerFactory.getLogger(BaseExpireSnapshotsSparkAction.class);
-
-  private static final String DATA_FILE = "Data File";
-  private static final String MANIFEST = "Manifest";
-  private static final String MANIFEST_LIST = "Manifest List";
-
-  private static final String STREAM_RESULTS = "stream-results";
-
-  // Creates an executor service that runs each task in the thread that invokes execute/submit.
-  private static final ExecutorService DEFAULT_DELETE_EXECUTOR_SERVICE = null;
 
   private final Table table;
   private final TableOperations ops;
@@ -92,7 +86,7 @@ public class BaseExpireSnapshotsSparkAction
   private Long expireOlderThanValue = null;
   private Integer retainLastValue = null;
   private Consumer<String> deleteFunc = defaultDelete;
-  private ExecutorService deleteExecutorService = DEFAULT_DELETE_EXECUTOR_SERVICE;
+  private ExecutorService deleteExecutorService = null;
   private Dataset<Row> expiredFiles = null;
 
   public BaseExpireSnapshotsSparkAction(SparkSession spark, Table table) {
@@ -212,7 +206,7 @@ public class BaseExpireSnapshotsSparkAction
   }
 
   private ExpireSnapshots.Result doExecute() {
-    boolean streamResults = PropertyUtil.propertyAsBoolean(options(), STREAM_RESULTS, false);
+    boolean streamResults = PropertyUtil.propertyAsBoolean(options(), STREAM_RESULTS, STREAM_RESULTS_DEFAULT);
     if (streamResults) {
       return deleteFiles(expire().toLocalIterator());
     } else {
@@ -220,15 +214,11 @@ public class BaseExpireSnapshotsSparkAction
     }
   }
 
-  private Dataset<Row> appendTypeString(Dataset<Row> ds, String type) {
-    return ds.select(new Column("file_path"), functions.lit(type).as("file_type"));
-  }
-
   private Dataset<Row> buildValidFileDF(TableMetadata metadata) {
-    Table staticTable = newStaticTable(metadata, this.table.io());
-    return appendTypeString(buildValidDataFileDF(staticTable), DATA_FILE)
-        .union(appendTypeString(buildManifestFileDF(staticTable), MANIFEST))
-        .union(appendTypeString(buildManifestListDF(staticTable), MANIFEST_LIST));
+    Table staticTable = newStaticTable(metadata, table.io());
+    return buildValidContentFileWithTypeDF(staticTable)
+        .union(withFileType(buildManifestFileDF(staticTable), MANIFEST))
+        .union(withFileType(buildManifestListDF(staticTable), MANIFEST_LIST));
   }
 
   /**
@@ -239,6 +229,8 @@ public class BaseExpireSnapshotsSparkAction
    */
   private BaseExpireSnapshotsActionResult deleteFiles(Iterator<Row> expired) {
     AtomicLong dataFileCount = new AtomicLong(0L);
+    AtomicLong posDeleteFileCount = new AtomicLong(0L);
+    AtomicLong eqDeleteFileCount = new AtomicLong(0L);
     AtomicLong manifestCount = new AtomicLong(0L);
     AtomicLong manifestListCount = new AtomicLong(0L);
 
@@ -254,23 +246,31 @@ public class BaseExpireSnapshotsSparkAction
           String file = fileInfo.getString(0);
           String type = fileInfo.getString(1);
           deleteFunc.accept(file);
-          switch (type) {
-            case DATA_FILE:
-              dataFileCount.incrementAndGet();
-              LOG.trace("Deleted Data File: {}", file);
-              break;
-            case MANIFEST:
-              manifestCount.incrementAndGet();
-              LOG.debug("Deleted Manifest: {}", file);
-              break;
-            case MANIFEST_LIST:
-              manifestListCount.incrementAndGet();
-              LOG.debug("Deleted Manifest List: {}", file);
-              break;
+
+          if (FileContent.DATA.name().equalsIgnoreCase(type)) {
+            dataFileCount.incrementAndGet();
+            LOG.trace("Deleted Data File: {}", file);
+          } else if (FileContent.POSITION_DELETES.name().equalsIgnoreCase(type)) {
+            posDeleteFileCount.incrementAndGet();
+            LOG.trace("Deleted Positional Delete File: {}", file);
+          } else if (FileContent.EQUALITY_DELETES.name().equalsIgnoreCase(type)) {
+            eqDeleteFileCount.incrementAndGet();
+            LOG.trace("Deleted Equality Delete File: {}", file);
+          } else if (MANIFEST.equals(type)) {
+            manifestCount.incrementAndGet();
+            LOG.debug("Deleted Manifest: {}", file);
+          } else if (MANIFEST_LIST.equalsIgnoreCase(type)) {
+            manifestListCount.incrementAndGet();
+            LOG.debug("Deleted Manifest List: {}", file);
+          } else {
+            throw new ValidationException("Illegal file type: %s", type);
           }
         });
 
-    LOG.info("Deleted {} total files", dataFileCount.get() + manifestCount.get() + manifestListCount.get());
-    return new BaseExpireSnapshotsActionResult(dataFileCount.get(), manifestCount.get(), manifestListCount.get());
+    long contentFileCount = dataFileCount.get() + posDeleteFileCount.get() + eqDeleteFileCount.get();
+    LOG.info("Deleted {} total files", contentFileCount + manifestCount.get() + manifestListCount.get());
+
+    return new BaseExpireSnapshotsActionResult(dataFileCount.get(), posDeleteFileCount.get(),
+        eqDeleteFileCount.get(), manifestCount.get(), manifestListCount.get());
   }
 }

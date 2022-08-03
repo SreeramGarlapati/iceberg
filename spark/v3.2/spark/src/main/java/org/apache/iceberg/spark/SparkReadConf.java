@@ -103,6 +103,12 @@ public class SparkReadConf {
         .parseOptional();
   }
 
+  public String snapshotRef() {
+    return confParser.stringConf()
+        .option(SparkReadOptions.SNAPSHOT_REF)
+        .parseOptional();
+  }
+
   public String fileScanTaskSetId() {
     return confParser.stringConf()
         .option(SparkReadOptions.FILE_SCAN_TASK_SET_ID)
@@ -113,6 +119,13 @@ public class SparkReadConf {
     return confParser.booleanConf()
         .option(SparkReadOptions.STREAMING_SKIP_DELETE_SNAPSHOTS)
         .defaultValue(SparkReadOptions.STREAMING_SKIP_DELETE_SNAPSHOTS_DEFAULT)
+        .parse();
+  }
+
+  public boolean streamingSkipOverwriteSnapshots() {
+    return confParser.booleanConf()
+        .option(SparkReadOptions.STREAMING_SKIP_OVERWRITE_SNAPSHOTS)
+        .defaultValue(SparkReadOptions.STREAMING_SKIP_OVERWRITE_SNAPSHOTS_DEFAULT)
         .parse();
   }
 
@@ -209,6 +222,13 @@ public class SparkReadConf {
         .option(SparkReadOptions.HANDLE_TIMESTAMP_WITHOUT_TIMEZONE)
         .sessionConf(SparkSQLProperties.HANDLE_TIMESTAMP_WITHOUT_TIMEZONE)
         .defaultValue(SparkSQLProperties.HANDLE_TIMESTAMP_WITHOUT_TIMEZONE_DEFAULT)
+        .parse();
+  }
+
+  public Long streamFromTimestamp() {
+    return confParser.longConf()
+        .option(SparkReadOptions.STREAM_FROM_TIMESTAMP)
+        .defaultValue(Long.MIN_VALUE)
         .parse();
   }
 }

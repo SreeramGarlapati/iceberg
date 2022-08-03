@@ -30,6 +30,7 @@ import org.apache.iceberg.Schema;
 import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.exceptions.ValidationException;
+import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
 import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
@@ -49,6 +50,18 @@ public class SnapshotUtil {
       }
     }
 
+    return false;
+  }
+
+  /**
+   * Returns whether ancestorSnapshotId is an ancestor of snapshotId using the given lookup function.
+   */
+  public static boolean isAncestorOf(long snapshotId, long ancestorSnapshotId, Function<Long, Snapshot> lookup) {
+    for (Snapshot snapshot : ancestorsOf(snapshotId, lookup)) {
+      if (snapshot.snapshotId() == ancestorSnapshotId) {
+        return true;
+      }
+    }
     return false;
   }
 
@@ -99,6 +112,51 @@ public class SnapshotUtil {
     Snapshot start = lookup.apply(snapshotId);
     Preconditions.checkArgument(start != null, "Cannot find snapshot: %s", snapshotId);
     return ancestorsOf(start, lookup);
+  }
+
+  /**
+   * Traverses the history of the table's current snapshot and finds the first snapshot committed after the given time.
+   *
+   * @param table a table
+   * @param timestampMillis a timestamp in milliseconds
+   * @return the first snapshot after the given timestamp, or null if the current snapshot is older than the timestamp
+   * @throws IllegalStateException if the first ancestor after the given time can't be determined
+   */
+  public static Snapshot oldestAncestorAfter(Table table, long timestampMillis) {
+    if (table.currentSnapshot() == null) {
+      // there are no snapshots or ancestors
+      return null;
+    }
+
+    Snapshot lastSnapshot = null;
+    for (Snapshot snapshot : currentAncestors(table)) {
+      if (snapshot.timestampMillis() < timestampMillis) {
+        return lastSnapshot;
+      } else if (snapshot.timestampMillis() == timestampMillis) {
+        return snapshot;
+      }
+
+      lastSnapshot = snapshot;
+    }
+
+    if (lastSnapshot != null && lastSnapshot.parentId() == null) {
+      // this is the first snapshot in the table, return it
+      return lastSnapshot;
+    }
+
+    throw new IllegalStateException(
+        "Cannot find snapshot older than " + DateTimeUtil.formatTimestampMillis(timestampMillis));
+  }
+
+  /**
+   * Returns list of snapshot ids in the range - (fromSnapshotId, toSnapshotId]
+   * <p>
+   * This method assumes that fromSnapshotId is an ancestor of toSnapshotId.
+   */
+  public static List<Long> snapshotIdsBetween(Table table, long fromSnapshotId, long toSnapshotId) {
+    List<Long> snapshotIds = Lists.newArrayList(ancestorIds(table.snapshot(toSnapshotId),
+        snapshotId -> snapshotId != fromSnapshotId ? table.snapshot(snapshotId) : null));
+    return snapshotIds;
   }
 
   public static Iterable<Long> ancestorIdsBetween(long latestSnapshotId, Long oldestSnapshotId,
@@ -170,7 +228,8 @@ public class SnapshotUtil {
     return Iterables.transform(snapshots, Snapshot::snapshotId);
   }
 
-  public static List<DataFile> newFiles(Long baseSnapshotId, long latestSnapshotId, Function<Long, Snapshot> lookup) {
+  public static List<DataFile> newFiles(
+      Long baseSnapshotId, long latestSnapshotId, Function<Long, Snapshot> lookup, FileIO io) {
     List<DataFile> newFiles = Lists.newArrayList();
     Snapshot lastSnapshot = null;
     for (Snapshot currentSnapshot : ancestorsOf(latestSnapshotId, lookup)) {
@@ -179,7 +238,7 @@ public class SnapshotUtil {
         return newFiles;
       }
 
-      Iterables.addAll(newFiles, currentSnapshot.addedFiles());
+      Iterables.addAll(newFiles, currentSnapshot.addedFiles(io));
     }
 
     ValidationException.check(Objects.equals(lastSnapshot.parentId(), baseSnapshotId),
@@ -251,6 +310,32 @@ public class SnapshotUtil {
     }
 
     // TODO: recover the schema by reading previous metadata files
+    return table.schema();
+  }
+
+  /**
+   * Convenience method for returning the schema of the table for a snapshot,
+   * when we have a snapshot id or a timestamp. Only one of them should be specified
+   * (non-null), or an IllegalArgumentException is thrown.
+   *
+   * @param table a {@link Table}
+   * @param snapshotId the ID of the snapshot
+   * @param timestampMillis the timestamp in millis since the Unix epoch
+   * @return the schema
+   * @throws IllegalArgumentException if both snapshotId and timestampMillis are non-null
+   */
+  public static Schema schemaFor(Table table, Long snapshotId, Long timestampMillis) {
+    Preconditions.checkArgument(snapshotId == null || timestampMillis == null,
+        "Cannot use both snapshot id and timestamp to find a schema");
+
+    if (snapshotId != null) {
+      return schemaFor(table, snapshotId);
+    }
+
+    if (timestampMillis != null) {
+      return schemaFor(table, snapshotIdAsOfTime(table, timestampMillis));
+    }
+
     return table.schema();
   }
 }

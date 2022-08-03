@@ -188,6 +188,7 @@ public class TestDataSourceOptions {
     PartitionSpec spec = PartitionSpec.unpartitioned();
     Map<String, String> options = Maps.newHashMap();
     options.put(TableProperties.SPLIT_SIZE, String.valueOf(128L * 1024 * 1024)); // 128Mb
+    options.put(TableProperties.DEFAULT_FILE_FORMAT, String.valueOf(FileFormat.AVRO)); // Arbitrarily splittable
     Table icebergTable = tables.create(SCHEMA, spec, options, tableLocation);
 
     List<SimpleRecord> expectedRecords = Lists.newArrayList(
@@ -202,7 +203,7 @@ public class TestDataSourceOptions {
         .mode("append")
         .save(tableLocation);
 
-    List<DataFile> files = Lists.newArrayList(icebergTable.currentSnapshot().addedFiles());
+    List<DataFile> files = Lists.newArrayList(icebergTable.currentSnapshot().addedFiles(icebergTable.io()));
     Assert.assertEquals("Should have written 1 file", 1, files.size());
 
     long fileSize = files.get(0).fileSizeInBytes();
@@ -244,7 +245,7 @@ public class TestDataSourceOptions {
     AssertHelpers.assertThrows(
         "Check both start-snapshot-id and snapshot-id are configured",
         IllegalArgumentException.class,
-        "Cannot specify start-snapshot-id and end-snapshot-id to do incremental scan",
+        "Cannot set start-snapshot-id and end-snapshot-id for incremental scans",
         () -> {
           spark.read()
               .format("iceberg")
@@ -257,7 +258,7 @@ public class TestDataSourceOptions {
     AssertHelpers.assertThrows(
         "Check both start-snapshot-id and snapshot-id are configured",
         IllegalArgumentException.class,
-        "Cannot specify start-snapshot-id and end-snapshot-id to do incremental scan",
+        "Cannot set start-snapshot-id and end-snapshot-id for incremental scans",
         () -> {
           spark.read()
               .format("iceberg")
@@ -271,7 +272,7 @@ public class TestDataSourceOptions {
     AssertHelpers.assertThrows(
         "Check both start-snapshot-id and snapshot-id are configured",
         IllegalArgumentException.class,
-        "Cannot only specify option end-snapshot-id to do incremental scan",
+        "Cannot set only end-snapshot-id for incremental scans",
         () -> {
           spark.read()
               .format("iceberg")
@@ -326,7 +327,7 @@ public class TestDataSourceOptions {
         .mode("append")
         .save(tableLocation);
 
-    List<ManifestFile> manifests = table.currentSnapshot().allManifests();
+    List<ManifestFile> manifests = table.currentSnapshot().allManifests(table.io());
 
     Assert.assertEquals("Must be 2 manifests", 2, manifests.size());
 
@@ -355,7 +356,7 @@ public class TestDataSourceOptions {
     HadoopTables tables = new HadoopTables(CONF);
     PartitionSpec spec = PartitionSpec.unpartitioned();
     Map<String, String> options = Maps.newHashMap();
-    tables.create(SCHEMA, spec, options, tableLocation);
+    Table icebergTable = tables.create(SCHEMA, spec, options, tableLocation);
 
     List<SimpleRecord> expectedRecords = Lists.newArrayList(
         new SimpleRecord(1, "a"),
@@ -370,7 +371,7 @@ public class TestDataSourceOptions {
     int splitSize = (int) TableProperties.METADATA_SPLIT_SIZE_DEFAULT; // 32MB split size
 
     int expectedSplits = ((int) tables.load(tableLocation + "#entries")
-        .currentSnapshot().allManifests().get(0).length() + splitSize - 1) / splitSize;
+        .currentSnapshot().allManifests(icebergTable.io()).get(0).length() + splitSize - 1) / splitSize;
 
     Dataset<Row> metadataDf = spark.read()
         .format("iceberg")

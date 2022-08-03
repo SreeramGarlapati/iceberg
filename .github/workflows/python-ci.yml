@@ -20,20 +20,26 @@
 name: "Python CI"
 on:
   push:
-    paths:
-    - '.github/workflows/python-ci.yml'
-    - 'python/**'
+    branches:
+    - 'master'
+    - '0.**'
+    tags:
+    - 'apache-iceberg-**'
   pull_request:
     paths:
     - '.github/workflows/python-ci.yml'
     - 'python/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   tox:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python: [3.7, 3.8, 3.9]
+        python: ['3.8', '3.9', '3.10']
 
     steps:
     - uses: actions/checkout@v2
@@ -46,4 +52,3 @@ jobs:
         pip install -U tox-gh-actions
     - working-directory: ./python
       run: tox
-

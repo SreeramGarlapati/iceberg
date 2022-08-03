@@ -1,6 +1,7 @@
 version.txt
 versions.lock
 versions.props
+.java-version
 books.json
 new-books.json
 build
@@ -8,6 +9,7 @@ build
 .rat-excludes
 LICENSE
 NOTICE
+revapi.yml
 gradlew
 examples/*
 gradle/*
@@ -23,3 +25,5 @@ gradle/*
 package-list
 sitemap.xml
 derby.log
+.python-version
+.*_index.md
