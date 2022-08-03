@@ -25,30 +25,38 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
-import org.apache.hadoop.conf.Configurable;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.iceberg.BaseMetastoreCatalog;
 import org.apache.iceberg.BaseMetastoreTableOperations;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.CatalogUtil;
+import org.apache.iceberg.LockManager;
 import org.apache.iceberg.TableMetadata;
 import org.apache.iceberg.TableOperations;
 import org.apache.iceberg.aws.AwsClientFactories;
+import org.apache.iceberg.aws.AwsClientFactory;
 import org.apache.iceberg.aws.AwsProperties;
+import org.apache.iceberg.aws.lakeformation.LakeFormationAwsClientFactory;
 import org.apache.iceberg.aws.s3.S3FileIO;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.SupportsNamespaces;
 import org.apache.iceberg.catalog.TableIdentifier;
+import org.apache.iceberg.common.DynMethods;
 import org.apache.iceberg.exceptions.AlreadyExistsException;
 import org.apache.iceberg.exceptions.NamespaceNotEmptyException;
 import org.apache.iceberg.exceptions.NoSuchNamespaceException;
 import org.apache.iceberg.exceptions.NoSuchTableException;
+import org.apache.iceberg.hadoop.Configurable;
 import org.apache.iceberg.io.CloseableGroup;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.relocated.com.google.common.annotations.VisibleForTesting;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
+import org.apache.iceberg.util.LocationUtil;
+import org.apache.iceberg.util.LockManagers;
+import org.apache.iceberg.util.PropertyUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.services.glue.GlueClient;
@@ -71,18 +79,26 @@ import software.amazon.awssdk.services.glue.model.Table;
 import software.amazon.awssdk.services.glue.model.TableInput;
 import software.amazon.awssdk.services.glue.model.UpdateDatabaseRequest;
 
-public class GlueCatalog extends BaseMetastoreCatalog implements Closeable, SupportsNamespaces, Configurable {
+public class GlueCatalog extends BaseMetastoreCatalog
+    implements Closeable, SupportsNamespaces, Configurable<Configuration> {
 
   private static final Logger LOG = LoggerFactory.getLogger(GlueCatalog.class);
 
   private GlueClient glue;
-  private Configuration hadoopConf;
+  private Object hadoopConf;
   private String catalogName;
   private String warehousePath;
   private AwsProperties awsProperties;
   private FileIO fileIO;
   private LockManager lockManager;
   private CloseableGroup closeableGroup;
+  private Map<String, String> catalogProperties;
+
+  // Attempt to set versionId if available on the path
+  private static final DynMethods.UnboundMethod SET_VERSION_ID = DynMethods.builder("versionId")
+      .hiddenImpl("software.amazon.awssdk.services.glue.model.UpdateTableRequest$Builder", String.class)
+      .orNoop()
+      .build();
 
   /**
    * No-arg constructor to load the catalog dynamically.
@@ -94,13 +110,46 @@ public class GlueCatalog extends BaseMetastoreCatalog implements Closeable, Supp
 
   @Override
   public void initialize(String name, Map<String, String> properties) {
+    this.catalogProperties = ImmutableMap.copyOf(properties);
+    AwsClientFactory awsClientFactory;
+    FileIO catalogFileIO;
+    if (PropertyUtil.propertyAsBoolean(
+        properties,
+        AwsProperties.GLUE_LAKEFORMATION_ENABLED,
+        AwsProperties.GLUE_LAKEFORMATION_ENABLED_DEFAULT)) {
+      String factoryImpl = PropertyUtil.propertyAsString(properties, AwsProperties.CLIENT_FACTORY, null);
+      ImmutableMap.Builder<String, String> builder = ImmutableMap.<String, String>builder().putAll(properties);
+      if (factoryImpl == null) {
+        builder.put(AwsProperties.CLIENT_FACTORY, LakeFormationAwsClientFactory.class.getName());
+      }
+
+      this.catalogProperties = builder.build();
+      awsClientFactory = AwsClientFactories.from(catalogProperties);
+      Preconditions.checkArgument(awsClientFactory instanceof LakeFormationAwsClientFactory,
+          "Detected LakeFormation enabled for Glue catalog, should use a client factory that extends %s, but found %s",
+          LakeFormationAwsClientFactory.class.getName(), factoryImpl);
+      catalogFileIO = null;
+    } else {
+      awsClientFactory = AwsClientFactories.from(properties);
+      catalogFileIO = initializeFileIO(properties);
+    }
+
     initialize(
         name,
         properties.get(CatalogProperties.WAREHOUSE_LOCATION),
         new AwsProperties(properties),
-        AwsClientFactories.from(properties).glue(),
-        LockManagers.from(properties),
-        initializeFileIO(properties));
+        awsClientFactory.glue(),
+        initializeLockManager(properties),
+        catalogFileIO);
+  }
+
+  private LockManager initializeLockManager(Map<String, String> properties) {
+    if (properties.containsKey(CatalogProperties.LOCK_IMPL)) {
+      return LockManagers.from(properties);
+    } else if (SET_VERSION_ID.isNoop()) {
+      return LockManagers.defaultLockManager();
+    }
+    return null;
   }
 
   private FileIO initializeFileIO(Map<String, String> properties) {
@@ -115,10 +164,26 @@ public class GlueCatalog extends BaseMetastoreCatalog implements Closeable, Supp
   }
 
   @VisibleForTesting
+  void initialize(
+      String name,
+      String path,
+      AwsProperties properties,
+      GlueClient client,
+      LockManager lock,
+      FileIO io,
+      Map<String, String> catalogProps) {
+    this.catalogProperties = catalogProps;
+    initialize(name, path, properties, client, lock, io);
+  }
+
+  @VisibleForTesting
   void initialize(String name, String path, AwsProperties properties, GlueClient client, LockManager lock, FileIO io) {
+    Preconditions.checkArgument(path != null && path.length() > 0,
+        "Cannot initialize GlueCatalog because warehousePath must not be null or empty");
+
     this.catalogName = name;
     this.awsProperties = properties;
-    this.warehousePath = cleanWarehousePath(path);
+    this.warehousePath = LocationUtil.stripTrailingSlash(path);
     this.glue = client;
     this.lockManager = lock;
     this.fileIO = io;
@@ -130,19 +195,21 @@ public class GlueCatalog extends BaseMetastoreCatalog implements Closeable, Supp
     closeableGroup.setSuppressCloseFailure(true);
   }
 
-  private String cleanWarehousePath(String path) {
-    Preconditions.checkArgument(path != null && path.length() > 0,
-        "Cannot initialize GlueCatalog because warehousePath must not be null");
-    int len = path.length();
-    if (path.charAt(len - 1) == '/') {
-      return path.substring(0, len - 1);
-    } else {
-      return path;
-    }
-  }
-
   @Override
   protected TableOperations newTableOps(TableIdentifier tableIdentifier) {
+    if (catalogProperties != null) {
+      Map<String, String> tableSpecificCatalogProperties = ImmutableMap.<String, String>builder()
+          .putAll(catalogProperties)
+          .put(AwsProperties.LAKE_FORMATION_DB_NAME,
+              IcebergToGlueConverter.getDatabaseName(tableIdentifier, awsProperties.glueCatalogSkipNameValidation()))
+          .put(AwsProperties.LAKE_FORMATION_TABLE_NAME,
+              IcebergToGlueConverter.getTableName(tableIdentifier, awsProperties.glueCatalogSkipNameValidation()))
+          .build();
+      // FileIO initialization depends on tableSpecificCatalogProperties, so a new FileIO is initialized each time
+      return new GlueTableOperations(glue, lockManager, catalogName, awsProperties,
+          initializeFileIO(tableSpecificCatalogProperties), tableIdentifier);
+    }
+
     return new GlueTableOperations(glue, lockManager, catalogName, awsProperties, fileIO, tableIdentifier);
   }
 
@@ -157,7 +224,7 @@ public class GlueCatalog extends BaseMetastoreCatalog implements Closeable, Supp
   protected String defaultWarehouseLocation(TableIdentifier tableIdentifier) {
     // check if value is set in database
     GetDatabaseResponse response = glue.getDatabase(GetDatabaseRequest.builder()
-        .name(IcebergToGlueConverter.getDatabaseName(tableIdentifier))
+        .name(IcebergToGlueConverter.getDatabaseName(tableIdentifier, awsProperties.glueCatalogSkipNameValidation()))
         .build());
     String dbLocationUri = response.database().locationUri();
     if (dbLocationUri != null) {
@@ -167,7 +234,7 @@ public class GlueCatalog extends BaseMetastoreCatalog implements Closeable, Supp
     return String.format(
         "%s/%s.db/%s",
         warehousePath,
-        IcebergToGlueConverter.getDatabaseName(tableIdentifier),
+        IcebergToGlueConverter.getDatabaseName(tableIdentifier, awsProperties.glueCatalogSkipNameValidation()),
         tableIdentifier.name());
   }
 
@@ -180,7 +247,7 @@ public class GlueCatalog extends BaseMetastoreCatalog implements Closeable, Supp
     do {
       GetTablesResponse response = glue.getTables(GetTablesRequest.builder()
           .catalogId(awsProperties.glueCatalogId())
-          .databaseName(IcebergToGlueConverter.toDatabaseName(namespace))
+          .databaseName(IcebergToGlueConverter.toDatabaseName(namespace, awsProperties.glueCatalogSkipNameValidation()))
           .nextToken(nextToken)
           .build());
       nextToken = response.nextToken();
@@ -209,7 +276,8 @@ public class GlueCatalog extends BaseMetastoreCatalog implements Closeable, Supp
       TableMetadata lastMetadata = ops.current();
       glue.deleteTable(DeleteTableRequest.builder()
           .catalogId(awsProperties.glueCatalogId())
-          .databaseName(IcebergToGlueConverter.getDatabaseName(identifier))
+          .databaseName(IcebergToGlueConverter.getDatabaseName(
+              identifier, awsProperties.glueCatalogSkipNameValidation()))
           .name(identifier.name())
           .build());
       LOG.info("Successfully dropped table {} from Glue", identifier);
@@ -242,10 +310,11 @@ public class GlueCatalog extends BaseMetastoreCatalog implements Closeable, Supp
     }
     // keep metadata
     Table fromTable = null;
-    String fromTableDbName = IcebergToGlueConverter.getDatabaseName(from);
-    String fromTableName = IcebergToGlueConverter.getTableName(from);
-    String toTableDbName = IcebergToGlueConverter.getDatabaseName(to);
-    String toTableName = IcebergToGlueConverter.getTableName(to);
+    String fromTableDbName = IcebergToGlueConverter.getDatabaseName(
+            from, awsProperties.glueCatalogSkipNameValidation());
+    String fromTableName = IcebergToGlueConverter.getTableName(from, awsProperties.glueCatalogSkipNameValidation());
+    String toTableDbName = IcebergToGlueConverter.getDatabaseName(to, awsProperties.glueCatalogSkipNameValidation());
+    String toTableName = IcebergToGlueConverter.getTableName(to, awsProperties.glueCatalogSkipNameValidation());
     try {
       GetTableResponse response = glue.getTable(GetTableRequest.builder()
           .catalogId(awsProperties.glueCatalogId())
@@ -292,7 +361,8 @@ public class GlueCatalog extends BaseMetastoreCatalog implements Closeable, Supp
     try {
       glue.createDatabase(CreateDatabaseRequest.builder()
           .catalogId(awsProperties.glueCatalogId())
-          .databaseInput(IcebergToGlueConverter.toDatabaseInput(namespace, metadata))
+          .databaseInput(IcebergToGlueConverter.toDatabaseInput(
+              namespace, metadata, awsProperties.glueCatalogSkipNameValidation()))
           .build());
       LOG.info("Created namespace: {}", namespace);
     } catch (software.amazon.awssdk.services.glue.model.AlreadyExistsException e) {
@@ -333,7 +403,8 @@ public class GlueCatalog extends BaseMetastoreCatalog implements Closeable, Supp
 
   @Override
   public Map<String, String> loadNamespaceMetadata(Namespace namespace) throws NoSuchNamespaceException {
-    String databaseName = IcebergToGlueConverter.toDatabaseName(namespace);
+    String databaseName = IcebergToGlueConverter.toDatabaseName(
+        namespace, awsProperties.glueCatalogSkipNameValidation());
     try {
       Database database = glue.getDatabase(GetDatabaseRequest.builder()
           .catalogId(awsProperties.glueCatalogId())
@@ -367,7 +438,7 @@ public class GlueCatalog extends BaseMetastoreCatalog implements Closeable, Supp
 
     GetTablesResponse response = glue.getTables(GetTablesRequest.builder()
         .catalogId(awsProperties.glueCatalogId())
-        .databaseName(IcebergToGlueConverter.toDatabaseName(namespace))
+        .databaseName(IcebergToGlueConverter.toDatabaseName(namespace, awsProperties.glueCatalogSkipNameValidation()))
         .build());
 
     if (response.hasTableList() && !response.tableList().isEmpty()) {
@@ -383,7 +454,7 @@ public class GlueCatalog extends BaseMetastoreCatalog implements Closeable, Supp
 
     glue.deleteDatabase(DeleteDatabaseRequest.builder()
         .catalogId(awsProperties.glueCatalogId())
-        .name(IcebergToGlueConverter.toDatabaseName(namespace))
+        .name(IcebergToGlueConverter.toDatabaseName(namespace, awsProperties.glueCatalogSkipNameValidation()))
         .build());
     LOG.info("Dropped namespace: {}", namespace);
     // Always successful, otherwise exception is thrown
@@ -397,8 +468,9 @@ public class GlueCatalog extends BaseMetastoreCatalog implements Closeable, Supp
     newProperties.putAll(properties);
     glue.updateDatabase(UpdateDatabaseRequest.builder()
         .catalogId(awsProperties.glueCatalogId())
-        .name(IcebergToGlueConverter.toDatabaseName(namespace))
-        .databaseInput(IcebergToGlueConverter.toDatabaseInput(namespace, newProperties))
+        .name(IcebergToGlueConverter.toDatabaseName(namespace, awsProperties.glueCatalogSkipNameValidation()))
+        .databaseInput(IcebergToGlueConverter.toDatabaseInput(
+            namespace, newProperties, awsProperties.glueCatalogSkipNameValidation()))
         .build());
     LOG.debug("Successfully set properties {} for {}", properties.keySet(), namespace);
     // Always successful, otherwise exception is thrown
@@ -414,8 +486,9 @@ public class GlueCatalog extends BaseMetastoreCatalog implements Closeable, Supp
 
     glue.updateDatabase(UpdateDatabaseRequest.builder()
         .catalogId(awsProperties.glueCatalogId())
-        .name(IcebergToGlueConverter.toDatabaseName(namespace))
-        .databaseInput(IcebergToGlueConverter.toDatabaseInput(namespace, metadata))
+        .name(IcebergToGlueConverter.toDatabaseName(namespace, awsProperties.glueCatalogSkipNameValidation()))
+        .databaseInput(IcebergToGlueConverter.toDatabaseInput(
+            namespace, metadata, awsProperties.glueCatalogSkipNameValidation()))
         .build());
     LOG.debug("Successfully removed properties {} from {}", properties, namespace);
     // Always successful, otherwise exception is thrown
@@ -424,6 +497,10 @@ public class GlueCatalog extends BaseMetastoreCatalog implements Closeable, Supp
 
   @Override
   protected boolean isValidIdentifier(TableIdentifier tableIdentifier) {
+    if (awsProperties.glueCatalogSkipNameValidation()) {
+      return true;
+    }
+
     return IcebergToGlueConverter.isValidNamespace(tableIdentifier.namespace()) &&
         IcebergToGlueConverter.isValidTableName(tableIdentifier.name());
   }
@@ -444,7 +521,7 @@ public class GlueCatalog extends BaseMetastoreCatalog implements Closeable, Supp
   }
 
   @Override
-  public Configuration getConf() {
-    return hadoopConf;
+  protected Map<String, String> properties() {
+    return catalogProperties == null ? ImmutableMap.of() : catalogProperties;
   }
 }

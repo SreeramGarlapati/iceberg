@@ -19,7 +19,6 @@
 
 package org.apache.iceberg.aws.glue;
 
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -33,7 +32,9 @@ import org.apache.iceberg.exceptions.NamespaceNotEmptyException;
 import org.apache.iceberg.exceptions.ValidationException;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
+import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.relocated.com.google.common.collect.Sets;
+import org.apache.iceberg.util.LockManagers;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
@@ -82,7 +83,7 @@ public class TestGlueCatalog {
   public void testConstructorEmptyWarehousePath() {
     AssertHelpers.assertThrows("warehouse path cannot be null",
         IllegalArgumentException.class,
-        "Cannot initialize GlueCatalog because warehousePath must not be null",
+        "Cannot initialize GlueCatalog because warehousePath must not be null or empty",
         () -> {
             GlueCatalog catalog = new GlueCatalog();
             catalog.initialize(CATALOG_NAME, null, new AwsProperties(), glue,
@@ -93,8 +94,8 @@ public class TestGlueCatalog {
   @Test
   public void testConstructorWarehousePathWithEndSlash() {
     GlueCatalog catalogWithSlash = new GlueCatalog();
-    catalogWithSlash.initialize(
-        CATALOG_NAME, WAREHOUSE_PATH + "/", new AwsProperties(), glue, LockManagers.defaultLockManager(), null);
+    catalogWithSlash.initialize(CATALOG_NAME, WAREHOUSE_PATH + "/", new AwsProperties(), glue,
+        LockManagers.defaultLockManager(), null);
     Mockito.doReturn(GetDatabaseResponse.builder()
         .database(Database.builder().name("db").build()).build())
         .when(glue).getDatabase(Mockito.any(GetDatabaseRequest.class));
@@ -199,7 +200,7 @@ public class TestGlueCatalog {
 
   @Test
   public void testDropTable() {
-    Map<String, String> properties = new HashMap<>();
+    Map<String, String> properties = Maps.newHashMap();
     properties.put(BaseMetastoreTableOperations.TABLE_TYPE_PROP,
         BaseMetastoreTableOperations.ICEBERG_TABLE_TYPE_VALUE);
     Mockito.doReturn(GetTableResponse.builder()
@@ -216,7 +217,7 @@ public class TestGlueCatalog {
   @Test
   public void testRenameTable() {
     AtomicInteger counter = new AtomicInteger(1);
-    Map<String, String> properties = new HashMap<>();
+    Map<String, String> properties = Maps.newHashMap();
     properties.put(BaseMetastoreTableOperations.TABLE_TYPE_PROP,
         BaseMetastoreTableOperations.ICEBERG_TABLE_TYPE_VALUE);
     Mockito.doReturn(GetTableResponse.builder()
@@ -242,11 +243,11 @@ public class TestGlueCatalog {
   public void testRenameTableWithStorageDescriptor() {
     AtomicInteger counter = new AtomicInteger(1);
 
-    Map<String, String> parameters = new HashMap<>();
+    Map<String, String> parameters = Maps.newHashMap();
     parameters.put(BaseMetastoreTableOperations.TABLE_TYPE_PROP,
             BaseMetastoreTableOperations.ICEBERG_TABLE_TYPE_VALUE);
 
-    Map<String, String> storageDescriptorParameters = new HashMap<>();
+    Map<String, String> storageDescriptorParameters = Maps.newHashMap();
     storageDescriptorParameters.put("key_0", "value_0");
 
     StorageDescriptor storageDescriptor = StorageDescriptor.builder().parameters(storageDescriptorParameters).build();
@@ -365,7 +366,7 @@ public class TestGlueCatalog {
 
   @Test
   public void testLoadNamespaceMetadata() {
-    Map<String, String> parameters = new HashMap<>();
+    Map<String, String> parameters = Maps.newHashMap();
     parameters.put("key", "val");
     Mockito.doReturn(GetDatabaseResponse.builder()
         .database(Database.builder().name("db1")
@@ -429,7 +430,7 @@ public class TestGlueCatalog {
 
   @Test
   public void testSetProperties() {
-    Map<String, String> parameters = new HashMap<>();
+    Map<String, String> parameters = Maps.newHashMap();
     parameters.put("key", "val");
     Mockito.doReturn(GetDatabaseResponse.builder()
         .database(Database.builder().name("db1")
@@ -443,7 +444,7 @@ public class TestGlueCatalog {
 
   @Test
   public void testRemoveProperties() {
-    Map<String, String> parameters = new HashMap<>();
+    Map<String, String> parameters = Maps.newHashMap();
     parameters.put("key", "val");
     Mockito.doReturn(GetDatabaseResponse.builder()
         .database(Database.builder().name("db1")
@@ -453,5 +454,38 @@ public class TestGlueCatalog {
     Mockito.doReturn(UpdateDatabaseResponse.builder().build())
         .when(glue).updateDatabase(Mockito.any(UpdateDatabaseRequest.class));
     glueCatalog.removeProperties(Namespace.of("db1"), Sets.newHashSet("key"));
+  }
+
+  @Test
+  public void testTablePropsDefinedAtCatalogLevel() {
+    ImmutableMap<String, String> catalogProps = ImmutableMap.of(
+        "table-default.key1", "catalog-default-key1",
+        "table-default.key2", "catalog-default-key2",
+        "table-default.key3", "catalog-default-key3",
+        "table-override.key3", "catalog-override-key3",
+        "table-override.key4", "catalog-override-key4");
+    glueCatalog.initialize(CATALOG_NAME, WAREHOUSE_PATH, new AwsProperties(), glue,
+        LockManagers.defaultLockManager(), null, catalogProps);
+    Map<String, String> properties = glueCatalog.properties();
+    Assert.assertFalse(properties.isEmpty());
+    Assert.assertTrue(properties.containsKey("table-default.key1"));
+    Assert.assertEquals("catalog-default-key1", properties.get("table-default.key1"));
+    Assert.assertTrue(properties.containsKey("table-default.key2"));
+    Assert.assertEquals("catalog-default-key2", properties.get("table-default.key2"));
+    Assert.assertTrue(properties.containsKey("table-default.key3"));
+    Assert.assertEquals("catalog-default-key3", properties.get("table-default.key3"));
+    Assert.assertTrue(properties.containsKey("table-override.key3"));
+    Assert.assertEquals("catalog-override-key3", properties.get("table-override.key3"));
+    Assert.assertTrue(properties.containsKey("table-override.key4"));
+    Assert.assertEquals("catalog-override-key4", properties.get("table-override.key4"));
+  }
+
+  @Test
+  public void testValidateIdentifierSkipNameValidation() {
+    AwsProperties props = new AwsProperties();
+    props.setGlueCatalogSkipNameValidation(true);
+    glueCatalog.initialize(CATALOG_NAME, WAREHOUSE_PATH, props, glue,
+        LockManagers.defaultLockManager(), null);
+    Assert.assertEquals(glueCatalog.isValidIdentifier(TableIdentifier.parse("db-1.a-1")), true);
   }
 }

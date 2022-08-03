@@ -39,14 +39,18 @@ import org.apache.iceberg.types.Types;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.connector.read.Scan;
 import org.apache.spark.sql.connector.read.ScanBuilder;
+import org.apache.spark.sql.connector.read.Statistics;
 import org.apache.spark.sql.connector.read.SupportsPushDownFilters;
 import org.apache.spark.sql.connector.read.SupportsPushDownRequiredColumns;
+import org.apache.spark.sql.connector.read.SupportsReportStatistics;
 import org.apache.spark.sql.sources.Filter;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 
-public class SparkScanBuilder implements ScanBuilder, SupportsPushDownFilters, SupportsPushDownRequiredColumns {
+public class SparkScanBuilder implements ScanBuilder, SupportsPushDownFilters, SupportsPushDownRequiredColumns,
+    SupportsReportStatistics {
+
   private static final Filter[] NO_FILTERS = new Filter[0];
 
   private final SparkSession spark;
@@ -62,24 +66,17 @@ public class SparkScanBuilder implements ScanBuilder, SupportsPushDownFilters, S
   private Filter[] pushedFilters = NO_FILTERS;
   private boolean ignoreResiduals = false;
 
-  SparkScanBuilder(SparkSession spark, Table table, CaseInsensitiveStringMap options) {
+  SparkScanBuilder(SparkSession spark, Table table, Schema schema, CaseInsensitiveStringMap options) {
     this.spark = spark;
     this.table = table;
+    this.schema = schema;
     this.readConf = new SparkReadConf(spark, table, options);
     this.options = options;
     this.caseSensitive = Boolean.parseBoolean(spark.conf().get("spark.sql.caseSensitive"));
   }
 
-  private Schema lazySchema() {
-    if (schema == null) {
-      if (requestedProjection != null) {
-        // the projection should include all columns that will be returned, including those only used in filters
-        this.schema = SparkSchemaUtil.prune(table.schema(), requestedProjection, filterExpression(), caseSensitive);
-      } else {
-        this.schema = table.schema();
-      }
-    }
-    return schema;
+  SparkScanBuilder(SparkSession spark, Table table, CaseInsensitiveStringMap options) {
+    this(spark, table, table.schema(), options);
   }
 
   private Expression filterExpression() {
@@ -108,7 +105,7 @@ public class SparkScanBuilder implements ScanBuilder, SupportsPushDownFilters, S
       Expression expr = SparkFilters.convert(filter);
       if (expr != null) {
         try {
-          Binder.bind(table.schema().asStruct(), expr, caseSensitive);
+          Binder.bind(schema.asStruct(), expr, caseSensitive);
           expressions.add(expr);
           pushed.add(filter);
         } catch (ValidationException e) {
@@ -136,6 +133,9 @@ public class SparkScanBuilder implements ScanBuilder, SupportsPushDownFilters, S
         .filter(field -> MetadataColumns.nonMetadataColumn(field.name()))
         .toArray(StructField[]::new));
 
+    // the projection should include all columns that will be returned, including those only used in filters
+    this.schema = SparkSchemaUtil.prune(schema, requestedProjection, filterExpression(), caseSensitive);
+
     Stream.of(requestedSchema.fields())
         .map(StructField::name)
         .filter(MetadataColumns::isMetadataColumn)
@@ -157,7 +157,7 @@ public class SparkScanBuilder implements ScanBuilder, SupportsPushDownFilters, S
     Schema meta = new Schema(fields);
 
     // schema or rows returned by readers
-    return TypeUtil.join(lazySchema(), meta);
+    return TypeUtil.join(schema, meta);
   }
 
   @Override
@@ -170,5 +170,15 @@ public class SparkScanBuilder implements ScanBuilder, SupportsPushDownFilters, S
     return new SparkMergeScan(
         spark, table, readConf, caseSensitive, ignoreResiduals,
         schemaWithMetadataColumns(), filterExpressions, options);
+  }
+
+  @Override
+  public Statistics estimateStatistics() {
+    return ((SparkBatchScan) build()).estimateStatistics();
+  }
+
+  @Override
+  public StructType readSchema() {
+    return build().readSchema();
   }
 }
