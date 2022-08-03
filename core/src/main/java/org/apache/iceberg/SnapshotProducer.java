@@ -27,6 +27,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
@@ -86,6 +87,9 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
   private boolean stageOnly = false;
   private Consumer<String> deleteFunc = defaultDelete;
 
+  private ExecutorService workerPool = ThreadPools.getWorkerPool();
+  private String targetBranch = SnapshotRef.MAIN_BRANCH;
+
   protected SnapshotProducer(TableOperations ops) {
     this.ops = ops;
     this.base = ops.current();
@@ -105,6 +109,48 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
   public ThisT stageOnly() {
     this.stageOnly = true;
     return self();
+  }
+
+  @Override
+  public ThisT scanManifestsWith(ExecutorService executorService) {
+    this.workerPool = executorService;
+    return self();
+  }
+
+  @Override
+  public ThisT toBranch(String branch) {
+    throw new UnsupportedOperationException("Performing operations on a branch is currently not supported");
+  }
+
+  /***
+   * Will be used by snapshot producer operations to create a new ref if an invalid branch is passed
+   * @param branch ref name on which operation is to performed
+   */
+  protected void createNewRef(String branch) {
+    SnapshotRef branchRef = SnapshotRef.branchBuilder(this.current().currentSnapshot().snapshotId()).build();
+    TableMetadata.Builder updatedBuilder = TableMetadata.buildFrom(this.current());
+    updatedBuilder.setRef(branch, branchRef);
+    ops.commit(ops.current(), updatedBuilder.build());
+  }
+
+  /***
+   * A setter for the target branch on which snapshot producer operation should be performed
+   * @param branch to set as target branch
+   */
+  protected void setTargetBranch(String branch) {
+    this.targetBranch = branch;
+  }
+
+  /***
+   * A getter for the target branch on which snapshot producer operation should be performed
+   * @return target branch
+   */
+  protected String getTargetBranch() {
+    return targetBranch;
+  }
+
+  protected ExecutorService workerPool() {
+    return this.workerPool;
   }
 
   @Override
@@ -153,9 +199,8 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
 
   @Override
   public Snapshot apply() {
-    this.base = refresh();
-    Long parentSnapshotId = base.currentSnapshot() != null ?
-        base.currentSnapshot().snapshotId() : null;
+    refresh();
+    Long parentSnapshotId = base.ref(targetBranch) != null ? base.ref(targetBranch).snapshotId() : null;
     long sequenceNumber = base.nextSequenceNumber();
 
     // run validations from the child operation
@@ -176,7 +221,7 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
 
         Tasks.range(manifestFiles.length)
             .stopOnFailure().throwFailureWhenFinished()
-            .executeWith(ThreadPools.getWorkerPool())
+            .executeWith(workerPool)
             .run(index ->
                 manifestFiles[index] = manifestsWithMetadata.get(manifests.get(index)));
 
@@ -282,14 +327,18 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
           .run(taskOps -> {
             Snapshot newSnapshot = apply();
             newSnapshotId.set(newSnapshot.snapshotId());
-            TableMetadata updated;
-            if (stageOnly) {
-              updated = base.addStagedSnapshot(newSnapshot);
+            TableMetadata.Builder update = TableMetadata.buildFrom(base);
+            if (base.snapshot(newSnapshot.snapshotId()) != null) {
+              // this is a rollback operation
+              update.setBranchSnapshot(newSnapshot.snapshotId(), targetBranch);
+            } else if (stageOnly) {
+              update.addSnapshot(newSnapshot);
             } else {
-              updated = base.replaceCurrentSnapshot(newSnapshot);
+              update.setBranchSnapshot(newSnapshot, targetBranch);
             }
 
-            if (updated == base) {
+            TableMetadata updated = update.build();
+            if (updated.changes().isEmpty()) {
               // do not commit if the metadata has not changed. for example, this may happen when setting the current
               // snapshot to an ID that is already current. note that this check uses identity.
               return;
@@ -306,14 +355,14 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
       Exceptions.suppressAndThrow(e, this::cleanAll);
     }
 
-    LOG.info("Committed snapshot {} ({})", newSnapshotId.get(), getClass().getSimpleName());
-
     try {
+      LOG.info("Committed snapshot {} ({})", newSnapshotId.get(), getClass().getSimpleName());
+
       // at this point, the commit must have succeeded. after a refresh, the snapshot is loaded by
       // id in case another commit was added between this commit and the refresh.
       Snapshot saved = ops.refresh().snapshot(newSnapshotId.get());
       if (saved != null) {
-        cleanUncommitted(Sets.newHashSet(saved.allManifests()));
+        cleanUncommitted(Sets.newHashSet(saved.allManifests(ops.io())));
         // also clean up unused manifest lists created by multiple attempts
         for (String manifestList : manifestLists) {
           if (!saved.manifestListLocation().equals(manifestList)) {
@@ -326,11 +375,15 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
         LOG.warn("Failed to load committed snapshot, skipping manifest clean-up");
       }
 
-    } catch (RuntimeException e) {
-      LOG.warn("Failed to load committed table metadata, skipping manifest clean-up", e);
+    } catch (Throwable e) {
+      LOG.warn("Failed to load committed table metadata or during cleanup, skipping further cleanup", e);
     }
 
-    notifyListeners();
+    try {
+      notifyListeners();
+    } catch (Throwable e) {
+      LOG.warn("Failed to notify event listeners", e);
+    }
   }
 
   private void notifyListeners() {
@@ -385,7 +438,7 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
   protected long snapshotId() {
     if (snapshotId == null) {
       synchronized (this) {
-        if (snapshotId == null) {
+        while (snapshotId == null || ops.current().snapshot(snapshotId) != null) {
           this.snapshotId = ops.newSnapshotId();
         }
       }

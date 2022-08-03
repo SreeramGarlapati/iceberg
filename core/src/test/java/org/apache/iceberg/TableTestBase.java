@@ -21,6 +21,7 @@ package org.apache.iceberg;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
@@ -53,9 +54,11 @@ public class TableTestBase {
       required(4, "data", Types.StringType.get())
   );
 
+  protected static final int BUCKETS_NUMBER = 16;
+
   // Partition spec used to create tables
   protected static final PartitionSpec SPEC = PartitionSpec.builderFor(SCHEMA)
-      .bucket("data", 16)
+      .bucket("data", BUCKETS_NUMBER)
       .build();
 
   static final DataFile FILE_A = DataFiles.builder(SPEC)
@@ -104,34 +107,24 @@ public class TableTestBase {
       .withPartitionPath("data_bucket=2") // easy way to set partition data for now
       .withRecordCount(1)
       .build();
+  static final DeleteFile FILE_C2_DELETES = FileMetadata.deleteFileBuilder(SPEC)
+      .ofEqualityDeletes(1)
+      .withPath("/path/to/data-c-deletes.parquet")
+      .withFileSizeInBytes(10)
+      .withPartitionPath("data_bucket=2") // easy way to set partition data for now
+      .withRecordCount(1)
+      .build();
   static final DataFile FILE_D = DataFiles.builder(SPEC)
       .withPath("/path/to/data-d.parquet")
       .withFileSizeInBytes(10)
       .withPartitionPath("data_bucket=3") // easy way to set partition data for now
       .withRecordCount(1)
       .build();
-  static final DataFile FILE_PARTITION_0 = DataFiles.builder(SPEC)
-      .withPath("/path/to/data-0.parquet")
+  static final DeleteFile FILE_D2_DELETES = FileMetadata.deleteFileBuilder(SPEC)
+      .ofEqualityDeletes(1)
+      .withPath("/path/to/data-d-deletes.parquet")
       .withFileSizeInBytes(10)
-      .withPartition(TestHelpers.Row.of(0))
-      .withRecordCount(1)
-      .build();
-  static final DataFile FILE_PARTITION_1 = DataFiles.builder(SPEC)
-      .withPath("/path/to/data-1.parquet")
-      .withFileSizeInBytes(10)
-      .withPartition(TestHelpers.Row.of(1))
-      .withRecordCount(1)
-      .build();
-  static final DataFile FILE_PARTITION_2 = DataFiles.builder(SPEC)
-      .withPath("/path/to/data-2.parquet")
-      .withFileSizeInBytes(10)
-      .withPartition(TestHelpers.Row.of(2))
-      .withRecordCount(1)
-      .build();
-  static final DataFile FILE_PARTITION_3 = DataFiles.builder(SPEC)
-      .withPath("/path/to/data-3.parquet")
-      .withFileSizeInBytes(10)
-      .withPartition(TestHelpers.Row.of(3))
+      .withPartitionPath("data_bucket=3") // easy way to set partition data for now
       .withRecordCount(1)
       .build();
   static final DataFile FILE_WITH_STATS = DataFiles.builder(SPEC)
@@ -191,6 +184,10 @@ public class TableTestBase {
   List<File> listManifestFiles(File tableDirToList) {
     return Lists.newArrayList(new File(tableDirToList, "metadata").listFiles((dir, name) ->
         !name.startsWith("snap") && Files.getFileExtension(name).equalsIgnoreCase("avro")));
+  }
+
+  public static long countAllMetadataFiles(File tableDir) {
+    return Arrays.stream(new File(tableDir, "metadata").listFiles()).filter(f -> f.isFile()).count();
   }
 
   protected TestTables.TestTable create(Schema schema, PartitionSpec spec) {
@@ -321,12 +318,12 @@ public class TableTestBase {
 
   void validateSnapshot(Snapshot old, Snapshot snap, Long sequenceNumber, DataFile... newFiles) {
     Assert.assertEquals("Should not change delete manifests",
-        old != null ? Sets.newHashSet(old.deleteManifests()) : ImmutableSet.of(),
-        Sets.newHashSet(snap.deleteManifests()));
-    List<ManifestFile> oldManifests = old != null ? old.dataManifests() : ImmutableList.of();
+        old != null ? Sets.newHashSet(old.deleteManifests(FILE_IO)) : ImmutableSet.of(),
+        Sets.newHashSet(snap.deleteManifests(FILE_IO)));
+    List<ManifestFile> oldManifests = old != null ? old.dataManifests(FILE_IO) : ImmutableList.of();
 
     // copy the manifests to a modifiable list and remove the existing manifests
-    List<ManifestFile> newManifests = Lists.newArrayList(snap.dataManifests());
+    List<ManifestFile> newManifests = Lists.newArrayList(snap.dataManifests(FILE_IO));
     for (ManifestFile oldManifest : oldManifests) {
       Assert.assertTrue("New snapshot should contain old manifests",
           newManifests.remove(oldManifest));
