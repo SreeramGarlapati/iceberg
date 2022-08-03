@@ -62,6 +62,15 @@ public interface FileIO extends Serializable, Closeable {
   }
 
   /**
+   * @return the property map used to configure this FileIO
+   * @throws UnsupportedOperationException if this FileIO does not expose its configuration properties
+   */
+  default Map<String, String> properties() {
+    throw new UnsupportedOperationException(String.format(
+        "%s does not expose configuration properties", this.getClass().toString()));
+  }
+
+  /**
    * Initialize File IO from catalog properties.
    * @param properties catalog properties
    */
@@ -74,6 +83,7 @@ public interface FileIO extends Serializable, Closeable {
    * Calling this method is only required when this FileIO instance is no longer expected to be used,
    * and the resources it holds need to be explicitly released to avoid resource leaks.
    */
+  @Override
   default void close() {
   }
 }

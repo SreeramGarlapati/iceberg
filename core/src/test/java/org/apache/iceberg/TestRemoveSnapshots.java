@@ -20,13 +20,12 @@
 package org.apache.iceberg;
 
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 import org.apache.iceberg.ManifestEntry.Status;
 import org.apache.iceberg.exceptions.ValidationException;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableSet;
@@ -34,6 +33,7 @@ import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.relocated.com.google.common.collect.Sets;
 import org.junit.Assert;
+import org.junit.Assume;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
@@ -96,7 +96,7 @@ public class TestRemoveSnapshots extends TableTestBase {
 
     Snapshot firstSnapshot = table.currentSnapshot();
     Assert.assertEquals("Should create one manifest",
-        1, firstSnapshot.allManifests().size());
+        1, firstSnapshot.allManifests(table.io()).size());
 
     waitUntilAfter(table.currentSnapshot().timestampMillis());
 
@@ -106,7 +106,7 @@ public class TestRemoveSnapshots extends TableTestBase {
 
     Snapshot secondSnapshot = table.currentSnapshot();
     Assert.assertEquals("Should create replace manifest with a rewritten manifest",
-        1, secondSnapshot.allManifests().size());
+        1, secondSnapshot.allManifests(table.io()).size());
 
     table.newAppend()
         .appendFile(FILE_B)
@@ -132,9 +132,9 @@ public class TestRemoveSnapshots extends TableTestBase {
     Assert.assertEquals("Should remove expired manifest lists and deleted data file",
         Sets.newHashSet(
             firstSnapshot.manifestListLocation(), // snapshot expired
-            firstSnapshot.allManifests().get(0).path(), // manifest was rewritten for delete
+            firstSnapshot.allManifests(table.io()).get(0).path(), // manifest was rewritten for delete
             secondSnapshot.manifestListLocation(), // snapshot expired
-            secondSnapshot.allManifests().get(0).path(), // manifest contained only deletes, was dropped
+            secondSnapshot.allManifests(table.io()).get(0).path(), // manifest contained only deletes, was dropped
             FILE_A.path()), // deleted
         deletedFiles);
   }
@@ -153,7 +153,7 @@ public class TestRemoveSnapshots extends TableTestBase {
 
     Snapshot firstSnapshot = table.currentSnapshot();
     Assert.assertEquals("Should create one manifest",
-        1, firstSnapshot.allManifests().size());
+        1, firstSnapshot.allManifests(table.io()).size());
 
     waitUntilAfter(table.currentSnapshot().timestampMillis());
 
@@ -163,7 +163,7 @@ public class TestRemoveSnapshots extends TableTestBase {
 
     Snapshot secondSnapshot = table.currentSnapshot();
     Assert.assertEquals("Should replace manifest with a rewritten manifest",
-        1, secondSnapshot.allManifests().size());
+        1, secondSnapshot.allManifests(table.io()).size());
 
     table.newFastAppend() // do not merge to keep the last snapshot's manifest valid
         .appendFile(FILE_C)
@@ -189,7 +189,7 @@ public class TestRemoveSnapshots extends TableTestBase {
     Assert.assertEquals("Should remove expired manifest lists and deleted data file",
         Sets.newHashSet(
             firstSnapshot.manifestListLocation(), // snapshot expired
-            firstSnapshot.allManifests().get(0).path(), // manifest was rewritten for delete
+            firstSnapshot.allManifests(table.io()).get(0).path(), // manifest was rewritten for delete
             secondSnapshot.manifestListLocation(), // snapshot expired
             FILE_A.path()), // deleted
         deletedFiles);
@@ -209,7 +209,7 @@ public class TestRemoveSnapshots extends TableTestBase {
 
     Snapshot firstSnapshot = table.currentSnapshot();
     Assert.assertEquals("Should create one manifest",
-        1, firstSnapshot.allManifests().size());
+        1, firstSnapshot.allManifests(table.io()).size());
 
     waitUntilAfter(table.currentSnapshot().timestampMillis());
 
@@ -218,8 +218,8 @@ public class TestRemoveSnapshots extends TableTestBase {
         .commit();
 
     Snapshot secondSnapshot = table.currentSnapshot();
-    Set<ManifestFile> secondSnapshotManifests = Sets.newHashSet(secondSnapshot.allManifests());
-    secondSnapshotManifests.removeAll(firstSnapshot.allManifests());
+    Set<ManifestFile> secondSnapshotManifests = Sets.newHashSet(secondSnapshot.allManifests(table.io()));
+    secondSnapshotManifests.removeAll(firstSnapshot.allManifests(table.io()));
     Assert.assertEquals("Should add one new manifest for append", 1, secondSnapshotManifests.size());
 
     table.manageSnapshots()
@@ -256,7 +256,7 @@ public class TestRemoveSnapshots extends TableTestBase {
 
     Snapshot firstSnapshot = table.currentSnapshot();
     Assert.assertEquals("Should create one manifest",
-        1, firstSnapshot.allManifests().size());
+        1, firstSnapshot.allManifests(table.io()).size());
 
     waitUntilAfter(table.currentSnapshot().timestampMillis());
 
@@ -265,8 +265,8 @@ public class TestRemoveSnapshots extends TableTestBase {
         .commit();
 
     Snapshot secondSnapshot = table.currentSnapshot();
-    Set<ManifestFile> secondSnapshotManifests = Sets.newHashSet(secondSnapshot.allManifests());
-    secondSnapshotManifests.removeAll(firstSnapshot.allManifests());
+    Set<ManifestFile> secondSnapshotManifests = Sets.newHashSet(secondSnapshot.allManifests(table.io()));
+    secondSnapshotManifests.removeAll(firstSnapshot.allManifests(table.io()));
     Assert.assertEquals("Should add one new manifest for append", 1, secondSnapshotManifests.size());
 
     table.manageSnapshots()
@@ -740,7 +740,7 @@ public class TestRemoveSnapshots extends TableTestBase {
       t4 = System.currentTimeMillis();
     }
 
-    List<ManifestFile> manifests = table.currentSnapshot().dataManifests();
+    List<ManifestFile> manifests = table.currentSnapshot().dataManifests(table.io());
 
     ManifestFile newManifest = writeManifest(
         "manifest-file-1.avro",
@@ -788,7 +788,7 @@ public class TestRemoveSnapshots extends TableTestBase {
       t4 = System.currentTimeMillis();
     }
 
-    List<ManifestFile> manifests = table.currentSnapshot().dataManifests();
+    List<ManifestFile> manifests = table.currentSnapshot().dataManifests(table.io());
 
     ManifestFile newManifest = writeManifest(
         "manifest-file-1.avro",
@@ -803,11 +803,18 @@ public class TestRemoveSnapshots extends TableTestBase {
     Set<String> deletedFiles = Sets.newHashSet();
     Set<String> deleteThreads = ConcurrentHashMap.newKeySet();
     AtomicInteger deleteThreadsIndex = new AtomicInteger(0);
+    AtomicInteger planThreadsIndex = new AtomicInteger(0);
 
     table.expireSnapshots()
         .executeDeleteWith(Executors.newFixedThreadPool(4, runnable -> {
           Thread thread = new Thread(runnable);
           thread.setName("remove-snapshot-" + deleteThreadsIndex.getAndIncrement());
+          thread.setDaemon(true); // daemon threads will be terminated abruptly when the JVM exits
+          return thread;
+        }))
+        .planWith(Executors.newFixedThreadPool(1, runnable -> {
+          Thread thread = new Thread(runnable);
+          thread.setName("plan-" + planThreadsIndex.getAndIncrement());
           thread.setDaemon(true); // daemon threads will be terminated abruptly when the JVM exits
           return thread;
         }))
@@ -824,6 +831,7 @@ public class TestRemoveSnapshots extends TableTestBase {
 
     Assert.assertTrue("FILE_A should be deleted", deletedFiles.contains(FILE_A.path().toString()));
     Assert.assertTrue("FILE_B should be deleted", deletedFiles.contains(FILE_B.path().toString()));
+    Assert.assertTrue("Thread should be created in provided pool", planThreadsIndex.get() > 0);
   }
 
   @Test
@@ -887,7 +895,7 @@ public class TestRemoveSnapshots extends TableTestBase {
         .appendFile(FILE_C)
         .commit();
 
-    Set<String> deletedFiles = new HashSet<>();
+    Set<String> deletedFiles = Sets.newHashSet();
 
     // Expire all commits including dangling staged snapshot.
     table.expireSnapshots()
@@ -895,17 +903,17 @@ public class TestRemoveSnapshots extends TableTestBase {
         .expireOlderThan(snapshotB.timestampMillis() + 1)
         .commit();
 
-    Set<String> expectedDeletes = new HashSet<>();
+    Set<String> expectedDeletes = Sets.newHashSet();
     expectedDeletes.add(snapshotA.manifestListLocation());
 
     // Files should be deleted of dangling staged snapshot
-    snapshotB.addedFiles().forEach(i -> {
+    snapshotB.addedDataFiles(table.io()).forEach(i -> {
       expectedDeletes.add(i.path().toString());
     });
 
     // ManifestList should be deleted too
     expectedDeletes.add(snapshotB.manifestListLocation());
-    snapshotB.dataManifests().forEach(file -> {
+    snapshotB.dataManifests(table.io()).forEach(file -> {
       // Only the manifest of B should be deleted.
       if (file.snapshotId() == snapshotB.snapshotId()) {
         expectedDeletes.add(file.path());
@@ -932,7 +940,7 @@ public class TestRemoveSnapshots extends TableTestBase {
     Snapshot snapshotA = table.currentSnapshot();
 
     // `B` commit
-    Set<String> deletedAFiles = new HashSet<>();
+    Set<String> deletedAFiles = Sets.newHashSet();
     table.newOverwrite()
         .addFile(FILE_B)
         .deleteFile(FILE_A)
@@ -964,7 +972,7 @@ public class TestRemoveSnapshots extends TableTestBase {
     table.manageSnapshots()
         .setCurrentSnapshot(snapshotC.snapshotId())
         .commit();
-    List<String> deletedFiles = new ArrayList<>();
+    List<String> deletedFiles = Lists.newArrayList();
 
     // Expire `C`
     table.expireSnapshots()
@@ -974,7 +982,7 @@ public class TestRemoveSnapshots extends TableTestBase {
 
     // Make sure no dataFiles are deleted for the B, C, D snapshot
     Lists.newArrayList(snapshotB, snapshotC, snapshotD).forEach(i -> {
-      i.addedFiles().forEach(item -> {
+      i.addedDataFiles(table.io()).forEach(item -> {
         Assert.assertFalse(deletedFiles.contains(item.path().toString()));
       });
     });
@@ -1017,7 +1025,7 @@ public class TestRemoveSnapshots extends TableTestBase {
     base = readMetadata();
     Snapshot snapshotD = base.snapshots().get(3);
 
-    List<String> deletedFiles = new ArrayList<>();
+    List<String> deletedFiles = Lists.newArrayList();
 
     // Expire `B` commit.
     table.expireSnapshots()
@@ -1027,7 +1035,7 @@ public class TestRemoveSnapshots extends TableTestBase {
 
     // Make sure no dataFiles are deleted for the staged snapshot
     Lists.newArrayList(snapshotB).forEach(i -> {
-      i.addedFiles().forEach(item -> {
+      i.addedDataFiles(table.io()).forEach(item -> {
         Assert.assertFalse(deletedFiles.contains(item.path().toString()));
       });
     });
@@ -1040,7 +1048,7 @@ public class TestRemoveSnapshots extends TableTestBase {
 
     // Make sure no dataFiles are deleted for the staged and cherry-pick
     Lists.newArrayList(snapshotB, snapshotD).forEach(i -> {
-      i.addedFiles().forEach(item -> {
+      i.addedDataFiles(table.io()).forEach(item -> {
         Assert.assertFalse(deletedFiles.contains(item.path().toString()));
       });
     });
@@ -1136,5 +1144,389 @@ public class TestRemoveSnapshots extends TableTestBase {
     Assert.assertEquals("Should remove expired manifest lists",
         Sets.newHashSet(firstSnapshot.manifestListLocation(), secondSnapshot.manifestListLocation()),
         deletedFiles);
+  }
+
+  @Test
+  public void testExpireWithDeleteFiles() {
+    Assume.assumeTrue("Delete files only supported in V2 spec", formatVersion == 2);
+
+    // Data Manifest => File_A
+    table.newAppend()
+        .appendFile(FILE_A)
+        .commit();
+    Snapshot firstSnapshot = table.currentSnapshot();
+
+    // Data Manifest => FILE_A
+    // Delete Manifest => FILE_A_DELETES
+    table.newRowDelta()
+        .addDeletes(FILE_A_DELETES)
+        .commit();
+    Snapshot secondSnapshot = table.currentSnapshot();
+    Assert.assertEquals("Should have 1 data manifest", 1, secondSnapshot.dataManifests(table.io()).size());
+    Assert.assertEquals("Should have 1 delete manifest", 1, secondSnapshot.deleteManifests(table.io()).size());
+
+    // FILE_A and FILE_A_DELETES move into "DELETED" state
+    table.newRewrite()
+        .rewriteFiles(
+            ImmutableSet.of(FILE_A), ImmutableSet.of(FILE_A_DELETES), // deleted
+            ImmutableSet.of(FILE_B), ImmutableSet.of(FILE_B_DELETES)) // added
+        .validateFromSnapshot(secondSnapshot.snapshotId())
+        .commit();
+    Snapshot thirdSnapshot = table.currentSnapshot();
+    Set<ManifestFile> manifestOfDeletedFiles = thirdSnapshot.allManifests(table.io()).stream().filter(
+        ManifestFile::hasDeletedFiles).collect(Collectors.toSet());
+    Assert.assertEquals("Should have two manifests of deleted files", 2,
+        manifestOfDeletedFiles.size());
+
+    // Need one more commit before manifests of files of DELETED state get cleared from current snapshot.
+    table.newAppend()
+        .appendFile(FILE_C)
+        .commit();
+
+    Snapshot fourthSnapshot = table.currentSnapshot();
+    long fourthSnapshotTs = waitUntilAfter(fourthSnapshot.timestampMillis());
+
+    Set<String> deletedFiles = Sets.newHashSet();
+    table.expireSnapshots()
+        .expireOlderThan(fourthSnapshotTs)
+        .deleteWith(deletedFiles::add)
+        .commit();
+
+    Assert.assertEquals("Should remove old delete files and delete file manifests",
+        ImmutableSet.builder()
+            .add(FILE_A.path())
+            .add(FILE_A_DELETES.path())
+            .add(firstSnapshot.manifestListLocation())
+            .add(secondSnapshot.manifestListLocation())
+            .add(thirdSnapshot.manifestListLocation())
+            .addAll(secondSnapshot.allManifests(FILE_IO).stream().map(ManifestFile::path).collect(Collectors.toList()))
+            .addAll(manifestOfDeletedFiles.stream().map(ManifestFile::path).collect(Collectors.toList()))
+            .build(),
+        deletedFiles);
+  }
+
+  @Test
+  public void testTagExpiration() {
+    table.newAppend()
+        .appendFile(FILE_A)
+        .commit();
+
+    long now = System.currentTimeMillis();
+    long maxAgeMs = 100;
+    long expirationTime = now + maxAgeMs;
+
+    table.manageSnapshots()
+        .createTag("tag", table.currentSnapshot().snapshotId())
+        .setMaxRefAgeMs("tag", maxAgeMs)
+        .commit();
+
+    table.newAppend()
+        .appendFile(FILE_B)
+        .commit();
+
+    table.manageSnapshots()
+        .createBranch("branch", table.currentSnapshot().snapshotId())
+        .commit();
+
+    waitUntilAfter(expirationTime);
+
+    table.expireSnapshots().cleanExpiredFiles(false).commit();
+
+    Assert.assertNull(table.ops().current().ref("tag"));
+    Assert.assertNotNull(table.ops().current().ref("branch"));
+    Assert.assertNotNull(table.ops().current().ref(SnapshotRef.MAIN_BRANCH));
+  }
+
+  @Test
+  public void testBranchExpiration() {
+    table.newAppend()
+        .appendFile(FILE_A)
+        .commit();
+
+    long now = System.currentTimeMillis();
+    long maxAgeMs = 100;
+    long expirationTime = now + maxAgeMs;
+
+    table.manageSnapshots()
+        .createBranch("branch", table.currentSnapshot().snapshotId())
+        .setMaxRefAgeMs("branch", maxAgeMs)
+        .commit();
+
+    table.newAppend()
+        .appendFile(FILE_B)
+        .commit();
+
+    table.manageSnapshots()
+        .createTag("tag", table.currentSnapshot().snapshotId())
+        .commit();
+
+    waitUntilAfter(expirationTime);
+
+    table.expireSnapshots().cleanExpiredFiles(false).commit();
+
+    Assert.assertNull(table.ops().current().ref("branch"));
+    Assert.assertNotNull(table.ops().current().ref("tag"));
+    Assert.assertNotNull(table.ops().current().ref(SnapshotRef.MAIN_BRANCH));
+  }
+
+  @Test
+  public void testMultipleRefsAndCleanExpiredFilesFails() {
+    table.newAppend()
+        .appendFile(FILE_A)
+        .commit();
+
+    table.manageSnapshots()
+        .createTag("TagA", table.currentSnapshot().snapshotId())
+        .commit();
+
+    AssertHelpers.assertThrows(
+        "Should fail removing snapshots and files when there is more than 1 ref",
+        UnsupportedOperationException.class,
+        "Cannot incrementally clean files for tables with more than 1 ref",
+        () -> table.expireSnapshots().cleanExpiredFiles(true).commit());
+  }
+
+  @Test
+  public void testFailRemovingSnapshotWhenStillReferencedByBranch() {
+    table.newAppend()
+        .appendFile(FILE_A)
+        .commit();
+
+    AppendFiles append = table.newAppend()
+        .appendFile(FILE_B)
+        .stageOnly();
+
+    long snapshotId = append.apply().snapshotId();
+
+    append.commit();
+
+    table.manageSnapshots()
+        .createBranch("branch", snapshotId)
+        .commit();
+
+    AssertHelpers.assertThrows(
+        "Should fail removing snapshot when it is still referenced",
+        IllegalArgumentException.class,
+        "Cannot expire 2. Still referenced by refs: [branch]",
+        () -> table.expireSnapshots().expireSnapshotId(snapshotId).commit());
+  }
+
+  @Test
+  public void testFailRemovingSnapshotWhenStillReferencedByTag() {
+    table.newAppend()
+        .appendFile(FILE_A)
+        .commit();
+
+    long snapshotId = table.currentSnapshot().snapshotId();
+
+    table.manageSnapshots()
+        .createTag("tag", snapshotId)
+        .commit();
+
+    // commit another snapshot so the first one isn't referenced by main
+    table.newAppend()
+        .appendFile(FILE_B)
+        .commit();
+
+    AssertHelpers.assertThrows(
+        "Should fail removing snapshot when it is still referenced",
+          IllegalArgumentException.class,
+        "Cannot expire 1. Still referenced by refs: [tag]",
+        () -> table.expireSnapshots().expireSnapshotId(snapshotId).commit());
+  }
+
+  @Test
+  public void testRetainUnreferencedSnapshotsWithinExpirationAge() {
+    table.newAppend()
+        .appendFile(FILE_A)
+        .commit();
+
+    long expireTimestampSnapshotA = waitUntilAfter(table.currentSnapshot().timestampMillis());
+    waitUntilAfter(expireTimestampSnapshotA);
+
+    table.newAppend()
+        .appendFile(FILE_B)
+        .stageOnly()
+        .commit();
+
+    table.newAppend()
+        .appendFile(FILE_C)
+        .commit();
+
+    table.expireSnapshots()
+        .expireOlderThan(expireTimestampSnapshotA)
+        .commit();
+
+    Assert.assertEquals(2, table.ops().current().snapshots().size());
+  }
+
+  @Test
+  public void testUnreferencedSnapshotParentOfTag() {
+    table.newAppend()
+        .appendFile(FILE_A)
+        .commit();
+
+    long initialSnapshotId = table.currentSnapshot().snapshotId();
+
+    // this will be expired because it is still unreferenced with a tag on its child snapshot
+    table.newAppend()
+        .appendFile(FILE_B)
+        .commit();
+
+    long expiredSnapshotId = table.currentSnapshot().snapshotId();
+
+    long expireTimestampSnapshotB = waitUntilAfter(table.currentSnapshot().timestampMillis());
+    waitUntilAfter(expireTimestampSnapshotB);
+
+    table.newAppend()
+        .appendFile(FILE_C)
+        .commit();
+
+    // create a tag that references the current history and rewrite main to point to the initial snapshot
+    table.manageSnapshots()
+        .createTag("tag", table.currentSnapshot().snapshotId())
+        .replaceBranch("main", initialSnapshotId)
+        .commit();
+
+    table.expireSnapshots()
+        .expireOlderThan(expireTimestampSnapshotB)
+        .cleanExpiredFiles(false)
+        .commit();
+
+    Assert.assertNull("Should remove unreferenced snapshot beneath a tag", table.snapshot(expiredSnapshotId));
+    Assert.assertEquals(2, table.ops().current().snapshots().size());
+  }
+
+  @Test
+  public void testSnapshotParentOfBranchNotUnreferenced() {
+    // similar to testUnreferencedSnapshotParentOfTag, but checks that branch history is not considered unreferenced
+    table.newAppend()
+        .appendFile(FILE_A)
+        .commit();
+
+    long initialSnapshotId = table.currentSnapshot().snapshotId();
+
+    // this will be expired because it is still unreferenced with a tag on its child snapshot
+    table.newAppend()
+        .appendFile(FILE_B)
+        .commit();
+
+    long snapshotId = table.currentSnapshot().snapshotId();
+
+    long expireTimestampSnapshotB = waitUntilAfter(table.currentSnapshot().timestampMillis());
+    waitUntilAfter(expireTimestampSnapshotB);
+
+    table.newAppend()
+        .appendFile(FILE_C)
+        .commit();
+
+    // create a branch that references the current history and rewrite main to point to the initial snapshot
+    table.manageSnapshots()
+        .createBranch("branch", table.currentSnapshot().snapshotId())
+        .setMaxSnapshotAgeMs("branch", Long.MAX_VALUE)
+        .replaceBranch("main", initialSnapshotId)
+        .commit();
+
+    table.expireSnapshots()
+        .expireOlderThan(expireTimestampSnapshotB)
+        .cleanExpiredFiles(false)
+        .commit();
+
+    Assert.assertNotNull("Should not remove snapshot beneath a branch", table.snapshot(snapshotId));
+    Assert.assertEquals(3, table.ops().current().snapshots().size());
+  }
+
+  // ToDo: Add tests which commit to branches once committing snapshots to a branch is supported
+
+  @Test
+  public void testMinSnapshotsToKeepMultipleBranches() {
+    table.newAppend().appendFile(FILE_A).commit();
+    long initialSnapshotId = table.currentSnapshot().snapshotId();
+    table.newAppend().appendFile(FILE_B).commit();
+
+    // stage a snapshot and get its id
+    AppendFiles append = table.newAppend().appendFile(FILE_C).stageOnly();
+    long branchSnapshotId = append.apply().snapshotId();
+    append.commit();
+
+    Assert.assertEquals("Should have 3 snapshots", 3, Iterables.size(table.snapshots()));
+
+    long maxSnapshotAgeMs = 1;
+    long expirationTime = System.currentTimeMillis() + maxSnapshotAgeMs;
+
+    // configure main so that the initial snapshot will expire
+    table.manageSnapshots()
+        .setMinSnapshotsToKeep(SnapshotRef.MAIN_BRANCH, 1)
+        .setMaxSnapshotAgeMs(SnapshotRef.MAIN_BRANCH, 1)
+        .commit();
+
+    // retain 3 snapshots on branch (including the initial snapshot)
+    table.manageSnapshots()
+        .createBranch("branch", branchSnapshotId)
+        .setMinSnapshotsToKeep("branch", 3)
+        .setMaxSnapshotAgeMs("branch", maxSnapshotAgeMs)
+        .commit();
+
+    waitUntilAfter(expirationTime);
+    table.expireSnapshots().cleanExpiredFiles(false).commit();
+
+    Assert.assertEquals("Should have 3 snapshots (none removed)", 3, Iterables.size(table.snapshots()));
+
+    // stop retaining snapshots from the branch
+    table.manageSnapshots()
+        .setMinSnapshotsToKeep("branch", 1)
+        .commit();
+
+    table.expireSnapshots().cleanExpiredFiles(false).commit();
+
+    Assert.assertEquals("Should have 2 snapshots (initial removed)", 2, Iterables.size(table.snapshots()));
+    Assert.assertNull(table.ops().current().snapshot(initialSnapshotId));
+  }
+
+  @Test
+  public void testMaxSnapshotAgeMultipleBranches() {
+    table.newAppend().appendFile(FILE_A).commit();
+    long initialSnapshotId = table.currentSnapshot().snapshotId();
+
+    long ageMs = 10;
+    long expirationTime = System.currentTimeMillis() + ageMs;
+
+    waitUntilAfter(expirationTime);
+
+    table.newAppend().appendFile(FILE_B).commit();
+
+    // configure main so that the initial snapshot will expire
+    table.manageSnapshots()
+        .setMaxSnapshotAgeMs(SnapshotRef.MAIN_BRANCH, ageMs)
+        .setMinSnapshotsToKeep(SnapshotRef.MAIN_BRANCH, 1)
+        .commit();
+
+    // stage a snapshot and get its id
+    AppendFiles append = table.newAppend().appendFile(FILE_C).stageOnly();
+    long branchSnapshotId = append.apply().snapshotId();
+    append.commit();
+
+    Assert.assertEquals("Should have 3 snapshots", 3, Iterables.size(table.snapshots()));
+
+    // retain all snapshots on branch (including the initial snapshot)
+    table.manageSnapshots()
+        .createBranch("branch", branchSnapshotId)
+        .setMinSnapshotsToKeep("branch", 1)
+        .setMaxSnapshotAgeMs("branch", Long.MAX_VALUE)
+        .commit();
+
+    table.expireSnapshots().cleanExpiredFiles(false).commit();
+
+    Assert.assertEquals("Should have 3 snapshots (none removed)", 3, Iterables.size(table.snapshots()));
+
+    // allow the initial snapshot to age off from branch
+    table.manageSnapshots()
+        .setMaxSnapshotAgeMs("branch", ageMs)
+        .commit();
+
+    table.expireSnapshots().cleanExpiredFiles(false).commit();
+
+    Assert.assertEquals("Should have 2 snapshots (initial removed)", 2, Iterables.size(table.snapshots()));
+    Assert.assertNull(table.ops().current().snapshot(initialSnapshotId));
   }
 }

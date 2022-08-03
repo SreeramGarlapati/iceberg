@@ -114,6 +114,21 @@ class FastAppend extends SnapshotProducer<AppendFiles> implements AppendFiles {
     return this;
   }
 
+  @Override
+  public FastAppend toBranch(String branch) {
+    Preconditions.checkArgument(branch != null, "branch cannot be null");
+    if (ops.current().ref(branch) == null) {
+      super.createNewRef(branch);
+    }
+
+    Preconditions.checkArgument(ops.current()
+            .ref(branch).type()
+            .equals(SnapshotRefType.BRANCH),
+        "%s is not a ref to type branch", branch);
+    setTargetBranch(branch);
+    return this;
+  }
+
   private ManifestFile copyManifest(ManifestFile manifest) {
     TableMetadata current = ops.current();
     InputFile toCopy = ops.io().newInputFile(manifest.path());
@@ -125,6 +140,8 @@ class FastAppend extends SnapshotProducer<AppendFiles> implements AppendFiles {
   @Override
   public List<ManifestFile> apply(TableMetadata base) {
     List<ManifestFile> newManifests = Lists.newArrayList();
+    Snapshot current = base.ref(getTargetBranch()) != null ?
+        base.snapshot(base.ref(getTargetBranch()).snapshotId()) : base.currentSnapshot();
 
     try {
       ManifestFile manifest = writeManifest();
@@ -140,8 +157,8 @@ class FastAppend extends SnapshotProducer<AppendFiles> implements AppendFiles {
         manifest -> GenericManifestFile.copyOf(manifest).withSnapshotId(snapshotId()).build());
     Iterables.addAll(newManifests, appendManifestsWithMetadata);
 
-    if (base.currentSnapshot() != null) {
-      newManifests.addAll(base.currentSnapshot().allManifests());
+    if (current != null) {
+      newManifests.addAll(current.allManifests(ops.io()));
     }
 
     return newManifests;
@@ -150,13 +167,14 @@ class FastAppend extends SnapshotProducer<AppendFiles> implements AppendFiles {
   @Override
   public Object updateEvent() {
     long snapshotId = snapshotId();
-    long sequenceNumber = ops.current().snapshot(snapshotId).sequenceNumber();
+    Snapshot snapshot = ops.current().snapshot(snapshotId);
+    long sequenceNumber = snapshot.sequenceNumber();
     return new CreateSnapshotEvent(
         tableName,
         operation(),
         snapshotId,
         sequenceNumber,
-        summary());
+        snapshot.summary());
   }
 
   @Override
