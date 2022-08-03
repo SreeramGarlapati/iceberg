@@ -26,6 +26,7 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import org.apache.iceberg.ManifestEntry.Status;
 import org.apache.iceberg.exceptions.CommitFailedException;
+import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.relocated.com.google.common.collect.Sets;
 import org.junit.Assert;
@@ -113,11 +114,11 @@ public class TestFastAppend extends TableTestBase {
 
     long commitId = snap.snapshotId();
 
-    validateManifest(snap.allManifests().get(0),
+    validateManifest(snap.allManifests(FILE_IO).get(0),
         seqs(1, 1),
         ids(commitId, commitId),
         files(FILE_C, FILE_D));
-    validateManifest(snap.allManifests().get(1),
+    validateManifest(snap.allManifests(FILE_IO).get(1),
         seqs(1, 1),
         ids(commitId, commitId),
         files(FILE_A, FILE_B));
@@ -137,7 +138,7 @@ public class TestFastAppend extends TableTestBase {
 
     TableMetadata base = readMetadata();
     Assert.assertNotNull("Should have a current snapshot", base.currentSnapshot());
-    List<ManifestFile> v2manifests = base.currentSnapshot().allManifests();
+    List<ManifestFile> v2manifests = base.currentSnapshot().allManifests(FILE_IO);
     Assert.assertEquals("Should have one existing manifest", 1, v2manifests.size());
 
     // prepare a new append
@@ -163,7 +164,7 @@ public class TestFastAppend extends TableTestBase {
 
     TableMetadata base = readMetadata();
     Assert.assertNotNull("Should have a current snapshot", base.currentSnapshot());
-    List<ManifestFile> v3manifests = base.currentSnapshot().allManifests();
+    List<ManifestFile> v3manifests = base.currentSnapshot().allManifests(FILE_IO);
     Assert.assertEquals("Should have 2 existing manifests", 2, v3manifests.size());
 
     // prepare a new append
@@ -193,7 +194,7 @@ public class TestFastAppend extends TableTestBase {
 
     TableMetadata base = readMetadata();
     Assert.assertNotNull("Should have a current snapshot", base.currentSnapshot());
-    List<ManifestFile> v2manifests = base.currentSnapshot().allManifests();
+    List<ManifestFile> v2manifests = base.currentSnapshot().allManifests(FILE_IO);
     Assert.assertEquals("Should have 1 existing manifest", 1, v2manifests.size());
 
     // commit from the stale table
@@ -220,7 +221,7 @@ public class TestFastAppend extends TableTestBase {
 
     TableMetadata base = readMetadata();
     Assert.assertNotNull("Should have a current snapshot", base.currentSnapshot());
-    List<ManifestFile> v2manifests = base.currentSnapshot().allManifests();
+    List<ManifestFile> v2manifests = base.currentSnapshot().allManifests(FILE_IO);
     Assert.assertEquals("Should have 1 existing manifest", 1, v2manifests.size());
 
     append.commit();
@@ -230,10 +231,10 @@ public class TestFastAppend extends TableTestBase {
     // apply was called before the conflicting commit, but the commit was still consistent
     validateSnapshot(base.currentSnapshot(), committed.currentSnapshot(), FILE_D);
 
-    List<ManifestFile> committedManifests = Lists.newArrayList(committed.currentSnapshot().allManifests());
-    committedManifests.removeAll(base.currentSnapshot().allManifests());
+    List<ManifestFile> committedManifests = Lists.newArrayList(committed.currentSnapshot().allManifests(FILE_IO));
+    committedManifests.removeAll(base.currentSnapshot().allManifests(FILE_IO));
     Assert.assertEquals("Should reused manifest created by apply",
-        pending.allManifests().get(0), committedManifests.get(0));
+        pending.allManifests(FILE_IO).get(0), committedManifests.get(0));
   }
 
   @Test
@@ -244,7 +245,7 @@ public class TestFastAppend extends TableTestBase {
 
     AppendFiles append = table.newFastAppend().appendFile(FILE_B);
     Snapshot pending = append.apply();
-    ManifestFile newManifest = pending.allManifests().get(0);
+    ManifestFile newManifest = pending.allManifests(FILE_IO).get(0);
     Assert.assertTrue("Should create new manifest", new File(newManifest.path()).exists());
 
     AssertHelpers.assertThrows("Should retry 4 times and throw last failure",
@@ -262,7 +263,7 @@ public class TestFastAppend extends TableTestBase {
     ManifestFile manifest = writeManifest(FILE_A, FILE_B);
     AppendFiles append = table.newFastAppend().appendManifest(manifest);
     Snapshot pending = append.apply();
-    ManifestFile newManifest = pending.allManifests().get(0);
+    ManifestFile newManifest = pending.allManifests(FILE_IO).get(0);
     Assert.assertTrue("Should create new manifest", new File(newManifest.path()).exists());
 
     AssertHelpers.assertThrows("Should retry 4 times and throw last failure",
@@ -281,7 +282,7 @@ public class TestFastAppend extends TableTestBase {
 
     AppendFiles append = table.newFastAppend().appendFile(FILE_B);
     Snapshot pending = append.apply();
-    ManifestFile newManifest = pending.allManifests().get(0);
+    ManifestFile newManifest = pending.allManifests(FILE_IO).get(0);
     Assert.assertTrue("Should create new manifest", new File(newManifest.path()).exists());
 
     append.commit();
@@ -291,7 +292,7 @@ public class TestFastAppend extends TableTestBase {
     validateSnapshot(null, metadata.currentSnapshot(), FILE_B);
     Assert.assertTrue("Should commit same new manifest", new File(newManifest.path()).exists());
     Assert.assertTrue("Should commit the same new manifest",
-        metadata.currentSnapshot().allManifests().contains(newManifest));
+        metadata.currentSnapshot().allManifests(FILE_IO).contains(newManifest));
   }
 
   @Test
@@ -304,7 +305,7 @@ public class TestFastAppend extends TableTestBase {
 
     AppendFiles append = table.newFastAppend().appendFile(FILE_B);
     Snapshot pending = append.apply();
-    ManifestFile newManifest = pending.allManifests().get(0);
+    ManifestFile newManifest = pending.allManifests(FILE_IO).get(0);
     Assert.assertTrue("Should create new manifest", new File(newManifest.path()).exists());
 
     append.commit();
@@ -314,7 +315,7 @@ public class TestFastAppend extends TableTestBase {
     validateSnapshot(null, metadata.currentSnapshot(), FILE_B);
     Assert.assertTrue("Should commit same new manifest", new File(newManifest.path()).exists());
     Assert.assertTrue("Should commit the same new manifest",
-        metadata.currentSnapshot().allManifests().contains(newManifest));
+        metadata.currentSnapshot().allManifests(FILE_IO).contains(newManifest));
   }
 
   @Test
@@ -334,7 +335,7 @@ public class TestFastAppend extends TableTestBase {
         .commit();
 
     Snapshot snapshot = table.currentSnapshot();
-    List<ManifestFile> manifests = table.currentSnapshot().allManifests();
+    List<ManifestFile> manifests = table.currentSnapshot().allManifests(FILE_IO);
     Assert.assertEquals("Should have 1 committed manifest", 1, manifests.size());
 
     validateManifestEntries(manifests.get(0),
@@ -477,5 +478,73 @@ public class TestFastAppend extends TableTestBase {
 
     String changedPartitions = table.currentSnapshot().summary().get(SnapshotSummary.CHANGED_PARTITION_COUNT_PROP);
     Assert.assertEquals("Should set changed partition count", "2", changedPartitions);
+  }
+
+  @Test
+  public void testAppendToBranch() throws UnsupportedOperationException {
+    table.newFastAppend()
+        .appendFile(FILE_A)
+        .commit();
+
+    TableMetadata branchBase = readMetadata();
+    Long branchSnapshotStart = table.currentSnapshot().snapshotId();
+
+    table.newFastAppend()
+        .appendFile(FILE_C)
+        .commit();
+
+    TableMetadata base = readMetadata();
+
+    table.newFastAppend()
+        .appendFile(FILE_D)
+        .commit();
+
+    Iterable<ManifestFile> allManifests = table.currentSnapshot().allManifests(table.io());
+    Assert.assertEquals(3, Iterables.size(allManifests));
+    validateSnapshot(base.currentSnapshot(), table.currentSnapshot(), 3, FILE_D);
+
+    table.manageSnapshots().createBranch("ref", branchSnapshotStart).commit();
+
+    table.newFastAppend()
+        .toBranch("ref")
+        .appendFile(FILE_B).commit();
+
+    Snapshot branchCurrentSnapshot = table.snapshot(table.ops().current().ref("ref").snapshotId());
+
+    Assert.assertEquals(branchSnapshotStart, branchCurrentSnapshot.parentId());
+    validateSnapshot(branchBase.currentSnapshot(), branchCurrentSnapshot, 4, FILE_B);
+
+    Iterable<ManifestFile> branchManifests = branchCurrentSnapshot.allManifests(table.io());
+    Assert.assertEquals(2, Iterables.size(branchManifests));
+
+    TableMetadata newBase = readMetadata();
+    table.newFastAppend()
+        .appendFile(FILE_A2)
+        .commit();
+    validateSnapshot(newBase.currentSnapshot(), table.currentSnapshot(), 5, FILE_A2);
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testAppendToNullBranch() {
+    table.newFastAppend()
+        .appendFile(FILE_A)
+        .commit();
+
+    table.manageSnapshots().createBranch("ref", table.currentSnapshot().snapshotId()).commit();
+    table.newFastAppend()
+        .toBranch(null)
+        .appendFile(FILE_B)
+        .commit();
+  }
+
+  @Test
+  public void testAppendToInValidBranch() {
+    table.newFastAppend()
+        .appendFile(FILE_A)
+        .commit();
+
+    table.manageSnapshots().createBranch("ref", table.currentSnapshot().snapshotId()).commit();
+    table.newFastAppend().appendFile(FILE_B).toBranch("newBranch").commit();
+    Assert.assertNotNull(table.ops().current().ref("newBranch"));
   }
 }
